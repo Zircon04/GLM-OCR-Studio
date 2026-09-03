@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT_DIR"
 
-VERSION="2.5.1"
+VERSION="${1:-1.0.0}"
 RELEASE_NAME="GLM-OCR-Studio-v${VERSION}-macOS-arm64"
 DIST_DIR="$ROOT_DIR/dist"
 ARCHIVE_PATH="$DIST_DIR/${RELEASE_NAME}.zip"
