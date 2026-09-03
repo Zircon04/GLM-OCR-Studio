@@ -1,0 +1,6 @@
+[submodule "GLM-OCR"]
+	path = GLM-OCR
+	url = https://github.com/zai-org/GLM-OCR.git
+[submodule "enhancement/realesrgan-mlx"]
+	path = enhancement/realesrgan-mlx
+	url = https://github.com/xocialize/realesrgan-mlx.git

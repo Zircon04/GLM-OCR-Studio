@@ -1,0 +1,43 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Virtual environments
+.venv*
+venv*/
+env*/
+
+# User data and OCR outputs
+results/
+library.sqlite3*
+
+# Logs and runtime files
+logs/
+tmp/
+state/
+*.pid
+*.log
+manager/queue-state.json
+
+# Python caches and distribution
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# Compiled Swift binaries & App bundles
+gui/GLMOCRLocal*
+*.app/
+*.dSYM/
+
+# Release archives
+*.zip
+*.tar.gz
+*.dmg
+release/

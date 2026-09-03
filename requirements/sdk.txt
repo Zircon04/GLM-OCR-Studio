@@ -1,0 +1,9 @@
+pymupdf>=1.24.0
+python-docx
+reportlab
+psutil
+Pillow
+requests
+rich
+python-dotenv
+-e ./GLM-OCR

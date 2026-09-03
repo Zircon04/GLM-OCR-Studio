@@ -1,0 +1,6 @@
+mlx>=0.22.0
+mlx-metal
+opencv-python-headless
+Pillow
+tqdm
+-e ./enhancement/realesrgan-mlx

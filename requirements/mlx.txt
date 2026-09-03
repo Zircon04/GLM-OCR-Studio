@@ -1,0 +1,8 @@
+mlx>=0.22.0
+mlx-vlm>=0.6.0
+mlx-metal
+mlx-lm
+fastapi
+uvicorn
+huggingface_hub
+Pillow
