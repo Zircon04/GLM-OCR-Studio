@@ -1,0 +1,30 @@
+[project]
+name = "realesrgan-mlx"
+version = "0.1.0"
+description = "Apple MLX port of Real-ESRGAN — RRDBNet + SRVGGNetCompact super-resolution with tile-based inference (BSD-3)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "BSD-3-Clause" }
+authors = [{ name = "MVS Collective (xocialize)" }]
+dependencies = [
+    "mlx>=0.31",
+    "numpy",
+    "huggingface_hub",
+    "pillow",
+]
+
+[project.optional-dependencies]
+# PyTorch + basicsr are DEV-only — used to generate the parity oracle / goldens.
+# End users installing the -mlx fork never pull torch.
+parity = ["torch>=2.2", "basicsr>=1.4.2", "realesrgan>=0.3.0"]
+dev = ["pytest"]
+
+[project.scripts]
+realesrgan-mlx = "realesrgan_mlx.pipeline_mlx:cli_main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["realesrgan_mlx", "realesrgan_mlx.archs", "realesrgan_mlx.utils"]

@@ -1,0 +1,350 @@
+## GLM-OCR
+
+[Read this in English](README.md)
+
+<div align="center">
+<img src=resources/logo.svg width="40%"/>
+</div>
+<p align="center">
+    👋 加入我们的 <a href="resources/WECHAT.md" target="_blank">微信群</a>
+    <br>
+    📖 查看 GLM-OCR <a href="https://arxiv.org/abs/2603.10910" target="_blank">技术报告</a>
+    <br>
+  📍 使用 GLM-OCR 的 <a href="https://docs.z.ai/guides/vlm/glm-ocr" target="_blank">API</a>
+</p>
+
+### 模型介绍
+
+GLM-OCR 是一款面向复杂文档理解的多模态 OCR 模型，基于 GLM-V 编码器—解码器架构构建。它引入 Multi-Token Prediction（MTP）损失与稳定的全任务强化学习训练策略，以提升训练效率、识别精度与泛化能力。模型集成了在大规模图文数据上预训练的 CogViT 视觉编码器、带高效 token 下采样的轻量跨模态连接器，以及 GLM-0.5B 语言解码器。结合基于 PP-DocLayout-V3 的“两阶段”流程——先做版面分析，再进行并行识别——GLM-OCR 能在多样化文档布局下提供稳健且高质量的 OCR 表现。
+
+关键特性
+
+- 业界领先的效果：在 OmniDocBench V1.5 上取得 94.62 分，综合排名第一；并在公式识别、表格识别、信息抽取等主流文档理解基准上达到 SOTA 水平。
+
+- 面向真实场景优化：针对实际业务需求进行设计与优化，在复杂表格、代码密集文档、印章等各类真实且高难版面场景中依然保持稳定表现。
+
+- 高效推理：总参数量仅 0.9B，支持通过 vLLM、SGLang 与 Ollama 部署，显著降低推理时延与算力成本，适用于高并发服务与端侧部署。
+
+- 上手简单：全面开源，并提供完整 [SDK](https://github.com/zai-org/GLM-OCR) 与推理工具链，支持便捷安装、一行调用、以及与现有生产流程的顺滑集成。
+
+### 最新动态
+
+- **[2026.3.12]** GLM-OCR SDK 新增 Agent Skill 模式 — `pip install glmocr` + 配置 API Key，即可通过 CLI 或 Python 直接使用，无需 GPU 和 YAML 配置。详情见：[GLM-OCR Skill](skills/glmocr/SKILL.md)
+- **[2026.3.12]** GLM-OCR 技术报告已上线，详情见：[GLM-OCR 技术报告](https://arxiv.org/abs/2603.10910)
+- **[2026.2.12]** 基于 LLaMA-Factory 的微调教程上线，详情见： [GLM-OCR 微调教程](examples/finetune/README_zh.md)
+
+### 下载模型
+
+| 模型    | 下载链接                                                                                                                    | 精度 |
+| ------- | --------------------------------------------------------------------------------------------------------------------------- | ---- |
+| GLM-OCR | [🤗 Hugging Face](https://huggingface.co/zai-org/GLM-OCR)<br> [🤖 ModelScope](https://modelscope.cn/models/ZhipuAI/GLM-OCR) | BF16 |
+
+## GLM-OCR SDK
+
+我们提供了 SDK，帮助你更高效、更便捷地使用 GLM-OCR。
+
+### 安装 SDK
+
+按场景选择最轻量的安装方式：
+
+```bash
+# 云端 / MaaS + 本地图片/PDF（安装最快）
+pip install glmocr
+
+# 自部署完整流水线（版面分析）
+pip install "glmocr[selfhosted]"
+
+# Flask 服务支持
+pip install "glmocr[server]"
+```
+
+从源码安装, 方便修改:
+
+```bash
+git clone https://github.com/zai-org/glm-ocr.git
+cd glm-ocr
+uv venv --python 3.12 --seed && source .venv/bin/activate
+uv pip install -e .
+```
+
+### 模型服务部署
+
+提供三种方式使用 GLM-OCR：
+
+#### 方式 1：智谱 MaaS API（推荐快速上手）
+
+使用云端托管 API，无需 GPU。云端服务已内置完整的 GLM-OCR 流水线，SDK 只做请求中转，直接返回结果。
+
+1. 在 https://open.bigmodel.cn 获取 API Key
+2. 配置 `config.yaml`：
+
+```yaml
+pipeline:
+  maas:
+    enabled: true # 启用 MaaS 模式
+    api_key: your-api-key # 必填
+```
+
+配置完成！当 `maas.enabled=true` 时，SDK 作为轻量级封装：
+
+- 将文档转发到智谱云端 API
+- 直接返回结果（Markdown + JSON 版面详情）
+- 无需本地处理，无需 GPU
+
+输入说明（MaaS）：上游接口的 `file` 支持传 URL 或 `data:<mime>;base64,...` 形式的 data URI。
+如果你手上只有“纯 base64”（没有 `data:` 前缀），建议先包装成 data URI。SDK 在 MaaS 模式下会自动
+把本地文件路径 / bytes / 纯 base64 包装成 data URI 再发送。
+
+API 文档：https://docs.bigmodel.cn/cn/guide/models/vlm/glm-ocr
+
+#### 方式 2：使用 vLLM / SGLang 自部署
+
+本地部署 GLM-OCR 模型，完全掌控。SDK 提供完整的处理流水线：版面检测、并行区域 OCR、结果格式化。
+
+请先安装自部署依赖：
+
+```bash
+pip install "glmocr[selfhosted]"
+```
+
+##### 使用 vLLM
+
+安装 vLLM：
+
+```bash
+docker pull vllm/vllm-openai:v0.19.0-ubuntu2404
+```
+
+或者使用 pip:
+
+```bash
+pip install -U "vllm>=0.19.0"
+```
+
+启动服务：
+
+```bash
+pip install "transformers>=5.3.0"
+
+vllm serve zai-org/GLM-OCR  --port 8080 --speculative-config '{"method": "mtp", "num_speculative_tokens": 3}' --served-model-name glm-ocr
+```
+
+> Note
+> 可按机器配置增加 `--max-model-len` 与 `--gpu-memory-utilization` 参数，以更好处理大图/大 PDF。
+
+##### 使用 SGLang
+
+安装 SGLang：
+
+```bash
+docker pull lmsysorg/sglang:v0.5.10
+```
+
+或者使用 pip:
+
+```bash
+pip install "sglang>=0.5.10"
+```
+
+启动服务：
+
+```bash
+SGLANG_ENABLE_SPEC_V2=1 sglang serve --model-path zai-org/GLM-OCR --port 8080 --speculative-algorithm NEXTN --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4 --served-model-name glm-ocr
+```
+
+> Note
+> 可按机器配置增加 `--context-len` 与 `--mem-fraction-static` 参数，以更好处理大图/大 PDF。
+
+#### 方式 3: 其他部署选项
+
+针对特定部署场景，请查看详细指南：
+
+- **[Apple Silicon 使用 mlx-vlm](examples/mlx-deploy/README.md)** - 针对 Apple Silicon Mac 优化
+- **[Ollama 部署](examples/ollama-deploy/README.md)** - 使用 Ollama 进行简单的本地部署
+
+#### 方式 4: SDK Server + Client（Client 无需 GPU）
+
+在 GPU 机器上部署 SDK Server，其他机器作为 Client 通过网络调用——Client 端无需 GPU。Client 通过 MaaS 兼容协议连接，将 `api_url` 指向自建 Server 即可。
+
+```yaml
+# Client 端 config.yaml
+pipeline:
+  maas:
+    enabled: true
+    api_url: http://<SERVER_IP>:5002/glmocr/parse
+    api_key: any-string    # 自建 Server 不校验 API key
+    verify_ssl: false
+```
+
+完整指南见：**[自部署 SDK Server + Client](examples/self-host/README.md)**
+
+##### 更新配置
+
+启动服务后，配置 `config.yaml`：
+
+```yaml
+pipeline:
+  maas:
+    enabled: false # 禁用 MaaS 模式（默认）
+  ocr_api:
+    api_host: localhost # 或你的 vLLM/SGLang 服务地址
+    api_port: 8080
+```
+
+### SDK 使用指南
+
+#### CLI
+
+```bash
+# 解析单张图片
+glmocr parse examples/source/code.png
+
+# 解析目录
+glmocr parse examples/source/
+
+# 指定输出目录
+glmocr parse examples/source/code.png --output ./results/
+
+# 使用自定义配置
+glmocr parse examples/source/code.png --config my_config.yaml
+
+# 开启 debug 日志（包含 profiling）
+glmocr parse examples/source/code.png --log-level DEBUG
+
+# 在 CPU 上运行版面检测（将 GPU 留给 OCR 模型）
+glmocr parse examples/source/code.png --layout-device cpu
+
+# 在指定 GPU 上运行版面检测
+glmocr parse examples/source/code.png --layout-device cuda:1
+
+# 通过 --set 覆盖任意配置项（使用 dotted path，可多次使用）
+glmocr parse examples/source/code.png --set pipeline.ocr_api.api_port 8080
+glmocr parse examples/source/ --set pipeline.layout.use_polygon true --set logging.level DEBUG
+```
+
+#### Python API
+
+```python
+from glmocr import GlmOcr, parse
+
+# 便捷函数
+result = parse("image.png")
+result = parse(["img1.png", "img2.jpg"])
+result = parse("https://example.com/image.png")
+result.save(output_dir="./results")
+
+# 说明：传入 list 会被当作同一文档的多页
+
+# 类接口
+with GlmOcr() as parser:
+    result = parser.parse("image.png")
+    print(result.json_result)
+    result.save()
+
+# 将版面模型放在 CPU（适合将 GPU 留给 OCR）
+with GlmOcr(layout_device="cpu") as parser:
+    result = parser.parse("image.png")
+
+# 将版面模型放在指定 GPU
+with GlmOcr(layout_device="cuda:1") as parser:
+    result = parser.parse("image.png")
+```
+
+#### Flask 服务
+
+请先安装可选的 server 依赖：
+
+```bash
+pip install "glmocr[server]"
+```
+
+```bash
+# 启动服务
+python -m glmocr.server
+
+# 开启 debug 日志
+python -m glmocr.server --log-level DEBUG
+
+# 调用 API
+curl -X POST http://localhost:5002/glmocr/parse \
+  -H "Content-Type: application/json" \
+  -d '{"images": ["./example/source/code.png"]}'
+```
+
+语义说明：
+
+- `images` 可以是 string 或 list。
+- list 会被当作同一文档的多页处理。
+- 如果要处理多个独立文档，请多次调用接口（一次请求一个文档）。
+
+### 模块化架构
+
+GLM-OCR 使用可组合模块，便于自定义扩展：
+
+| 组件                  | 说明                         |
+| --------------------- | ---------------------------- |
+| `PageLoader`          | 预处理与图像编码             |
+| `OCRClient`           | 调用 GLM-OCR 模型服务        |
+| `PPDocLayoutDetector` | 基于 PP-DocLayout 的版面分析 |
+| `ResultFormatter`     | 后处理与输出 JSON/Markdown   |
+
+你也可以通过自定义 pipeline 扩展行为：
+
+```python
+from glmocr.dataloader import PageLoader
+from glmocr.ocr_client import OCRClient
+from glmocr.postprocess import ResultFormatter
+
+
+class MyPipeline:
+  def __init__(self, config):
+    self.page_loader = PageLoader(config)
+    self.ocr_client = OCRClient(config)
+    self.formatter = ResultFormatter(config)
+
+  def process(self, request_data):
+    # 实现你自己的处理逻辑
+    pass
+```
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=zai-org%2FGLM-OCR&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=zai-org/GLM-OCR&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=zai-org/GLM-OCR&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=zai-org/GLM-OCR&type=date&legend=top-left" />
+ </picture>
+</a>
+
+## 致谢
+
+本项目受以下项目与社区的杰出工作启发：
+
+- [PP-DocLayout-V3](https://huggingface.co/PaddlePaddle/PP-DocLayoutV3)
+- [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)
+- [MinerU](https://github.com/opendatalab/MinerU)
+
+## 开源协议
+
+本仓库代码遵循 Apache License 2.0。
+
+GLM-OCR 模型遵循 MIT License。
+
+完整 OCR pipeline 集成了用于文档版面分析的 [PP-DocLayoutV3](https://huggingface.co/PaddlePaddle/PP-DocLayoutV3)，该组件遵循 Apache License 2.0。使用本项目时请同时遵守相关许可证。
+
+## 引用
+
+如果 GLM-OCR 对您的研究有所帮助，欢迎引用我们的技术报告：
+
+```bibtex
+@misc{duan2026glmocrtechnicalreport,
+      title={GLM-OCR Technical Report},
+      author={Shuaiqi Duan and Yadong Xue and Weihan Wang and Zhe Su and Huan Liu and Sheng Yang and Guobing Gan and Guo Wang and Zihan Wang and Shengdong Yan and Dexin Jin and Yuxuan Zhang and Guohong Wen and Yanfeng Wang and Yutao Zhang and Xiaohan Zhang and Wenyi Hong and Yukuo Cen and Da Yin and Bin Chen and Wenmeng Yu and Xiaotao Gu and Jie Tang},
+      year={2026},
+      eprint={2603.10910},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2603.10910},
+}
+```
