@@ -35,7 +35,7 @@ cp stop-glm-ocr.command "$STAGE_DIR/"
 cp run-ocr.command "$STAGE_DIR/"
 cp README.md "$STAGE_DIR/"
 cp LICENSE "$STAGE_DIR/"
-cp .gitmodules "$STAGE_DIR/"
+
 cp .gitignore "$STAGE_DIR/"
 
 # Clean up unwanted artifacts from staging
