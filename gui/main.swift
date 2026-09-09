@@ -110,6 +110,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     private var cleanupButton: NSButton!
     private var enhanceCheckbox: NSButton!
     private var enhancementModePopup: NSPopUpButton!
+    private var fullMDCheckbox: NSButton!
+    private var splitMDCheckbox: NSButton!
     private var htmlCheckbox: NSButton!
     private var docxCheckbox: NSButton!
     private var searchablePDFCheckbox: NSButton!
@@ -345,8 +347,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         formatsRow.spacing = 12
         let formatsTitle = NSTextField(labelWithString: "Создать:")
         formatsTitle.font = .systemFont(ofSize: 12.5, weight: .semibold)
-        let markdownLabel = NSTextField(labelWithString: "Markdown + JSON — всегда")
-        markdownLabel.textColor = .secondaryLabelColor
+        fullMDCheckbox = NSButton(checkboxWithTitle: "MD (полный)", target: nil, action: nil)
+        splitMDCheckbox = NSButton(checkboxWithTitle: "MD (по главам)", target: nil, action: nil)
         htmlCheckbox = NSButton(checkboxWithTitle: "HTML", target: nil, action: nil)
         docxCheckbox = NSButton(checkboxWithTitle: "DOCX", target: nil, action: nil)
         searchablePDFCheckbox = NSButton(checkboxWithTitle: "С исходным видом", target: nil, action: nil)
@@ -354,11 +356,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         cleanPDFCheckbox = NSButton(checkboxWithTitle: "Чистый цифровой", target: nil, action: nil)
         cleanPDFCheckbox.toolTip = "Новый PDF из распознанного текста, таблиц, формул и улучшенных рисунков"
         zipCheckbox = NSButton(checkboxWithTitle: "ZIP", target: nil, action: nil)
-        for checkbox in [htmlCheckbox, docxCheckbox, searchablePDFCheckbox, cleanPDFCheckbox, zipCheckbox] {
+        for checkbox in [fullMDCheckbox, splitMDCheckbox, htmlCheckbox, docxCheckbox, searchablePDFCheckbox, cleanPDFCheckbox, zipCheckbox] {
             checkbox?.state = .on
         }
         formatsRow.addArrangedSubview(formatsTitle)
-        formatsRow.addArrangedSubview(markdownLabel)
+        formatsRow.addArrangedSubview(fullMDCheckbox)
+        formatsRow.addArrangedSubview(splitMDCheckbox)
         formatsRow.addArrangedSubview(htmlCheckbox)
         formatsRow.addArrangedSubview(docxCheckbox)
         formatsRow.addArrangedSubview(NSView())
@@ -1611,6 +1614,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     private func enhancementMode() -> String { enhanceCheckbox.state == .off ? "off" : (enhancementModePopup.indexOfSelectedItem == 0 ? "hybrid" : "safe") }
     private func selectedExportFormats() -> [String] {
         var formats: [String] = []
+        if fullMDCheckbox.state == .on { formats.append("md") }
+        if splitMDCheckbox.state == .on { formats.append("split_md") }
         if htmlCheckbox.state == .on { formats.append("html") }
         if docxCheckbox.state == .on { formats.append("docx") }
         if searchablePDFCheckbox.state == .on { formats.append("searchable_pdf") }
@@ -1620,6 +1625,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     }
     private func formatTitle(_ format: String) -> String {
         switch format {
+        case "md": return "MD (полный)"
+        case "split_md": return "MD (по главам)"
         case "html": return "HTML"
         case "docx": return "DOCX"
         case "searchable_pdf": return "PDF с исходным видом"
@@ -1632,7 +1639,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         profilePopup.isEnabled = !locked
         enhanceCheckbox.isEnabled = !locked
         enhancementModePopup.isEnabled = !locked
-        for checkbox in [htmlCheckbox, docxCheckbox, searchablePDFCheckbox, cleanPDFCheckbox, zipCheckbox] {
+        for checkbox in [fullMDCheckbox, splitMDCheckbox, htmlCheckbox, docxCheckbox, searchablePDFCheckbox, cleanPDFCheckbox, zipCheckbox] {
             checkbox?.isEnabled = !locked
         }
         stopButton.isEnabled = serverRunning && !locked

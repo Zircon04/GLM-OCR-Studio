@@ -158,18 +158,55 @@ def make_searchable_pdf(source: Path, json_path: Path, output: Path) -> None:
     doc.close()
 
 
+def make_split_md(markdown: str, output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    lines = markdown.splitlines(keepends=True)
+    heading_prefix = '# '
+    current_section = []
+    section_title = "00_Введение"
+    part_counter = 1
+
+    def save_section():
+        nonlocal part_counter
+        if not current_section:
+            return
+        
+        clean_title = re.sub(r'[\\/*?:"<>|]', "", section_title).strip()
+        clean_title = clean_title.replace(" ", "_")
+        if not clean_title:
+            clean_title = f"part_{part_counter}"
+            
+        filename = f"{part_counter:02d}_{clean_title}.md"
+        filepath = output_dir / filename
+        
+        filepath.write_text("".join(current_section), encoding='utf-8')
+        part_counter += 1
+
+    for line in lines:
+        if line.startswith(heading_prefix):
+            if current_section:
+                save_section()
+            section_title = line[len(heading_prefix):].strip()
+            current_section = [line]
+        else:
+            current_section.append(line)
+
+    if current_section:
+        save_section()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--result", required=True)
     parser.add_argument("--source", required=True)
     parser.add_argument("--output-root", required=True)
-    parser.add_argument("--formats", default="html,docx,searchable_pdf,clean_pdf,zip")
+    parser.add_argument("--formats", default="md,split_md,html,docx,searchable_pdf,clean_pdf,zip")
     args = parser.parse_args()
     result = Path(args.result)
     source = Path(args.source)
     output_root = Path(args.output_root)
     requested = [item.strip() for item in args.formats.split(",") if item.strip()]
-    allowed = {"html", "docx", "searchable_pdf", "clean_pdf", "zip"}
+    allowed = {"md", "split_md", "html", "docx", "searchable_pdf", "clean_pdf", "zip"}
     formats = [item for item in requested if item in allowed]
     exports = output_root / "exports"
     exports.mkdir(parents=True, exist_ok=True)
@@ -188,7 +225,13 @@ def main() -> int:
     for format_name in formats:
         emit("export_format_started", format=format_name, done=done, total=total)
         path: Path | None = None
-        if format_name == "html":
+        if format_name == "md":
+            path = exports / f"{base}.md"
+            path.write_text(markdown, encoding="utf-8")
+        elif format_name == "split_md":
+            path = exports / f"{base}_chapters"
+            make_split_md(markdown, path)
+        elif format_name == "html":
             path = exports / f"{base}.html"
             path.write_text(markdown_to_html(markdown, base), encoding="utf-8")
         elif format_name == "docx":
