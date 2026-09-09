@@ -14,7 +14,9 @@ import subprocess
 import sys
 import time
 import unicodedata
+import codecs
 import hashlib
+import psutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -84,11 +86,7 @@ def chunk_size_for(profile: dict[str, int | str]) -> int:
 
 def memory_free_percent() -> int | None:
     try:
-        result = subprocess.run(
-            ["/usr/bin/memory_pressure", "-Q"], capture_output=True, text=True, timeout=4
-        )
-        match = re.search(r"free percentage:\s*(\d+)%", result.stdout + result.stderr)
-        return int(match.group(1)) if match else None
+        return int(100 - psutil.virtual_memory().percent)
     except Exception:
         return None
 
@@ -145,10 +143,15 @@ def server_log_offset() -> int:
 
 def count_new_fragments(offset: int) -> tuple[int, int]:
     try:
+        count = 0
         with SERVER_LOG.open("rb") as handle:
             handle.seek(offset)
-            data = handle.read()
-            return data.count(b"Request completed: endpoint=/chat/completions"), offset + len(data)
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                count += chunk.count(b"Request completed: endpoint=/chat/completions")
+            return count, handle.tell()
     except OSError:
         return 0, offset
 
@@ -173,13 +176,14 @@ def run_streaming(command: list[str], stage: str, state: dict[str, Any], state_p
     units_total = 0
     segment_started_at = time.time()
     processing_base = float(state.get("processing_seconds", 0.0))
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     while active_child.poll() is None or selector.get_map():
         for key, _ in selector.select(timeout=0.5):
             data = os.read(key.fileobj.fileno(), 65536)
             if not data:
                 selector.unregister(key.fileobj)
                 continue
-            pending += data.decode("utf-8", errors="replace").replace("\r", "\n")
+            pending += decoder.decode(data).replace("\r", "\n")
             parts = pending.split("\n")
             pending = parts.pop()
             for line in parts:
@@ -249,18 +253,6 @@ def find_artifact(directory: Path, suffix: str, exclude: str = "") -> Path | Non
     return sorted(matches, key=lambda p: len(p.parts))[0] if matches else None
 
 
-def replace_strings(value: Any, replacements: dict[str, str]) -> Any:
-    if isinstance(value, str):
-        for old, new in replacements.items():
-            value = value.replace(old, new)
-        return value
-    if isinstance(value, list):
-        return [replace_strings(item, replacements) for item in value]
-    if isinstance(value, dict):
-        return {key: replace_strings(item, replacements) for key, item in value.items()}
-    return value
-
-
 def image_job_stamp(state: dict[str, Any], output_root: Path) -> str:
     """Stable per-job prefix used by image files and Markdown links."""
     started = float(state.get("started_at", 0) or 0)
@@ -309,11 +301,17 @@ def merge_chunks(state: dict[str, Any], output_root: Path) -> Path:
             for local_page, image in enumerate(images):
                 shutil.copy2(image, final_layout / f"layout_page{chunk['start'] + local_page:04d}{image.suffix.lower()}")
         if json_path:
-            data = replace_strings(json.loads(json_path.read_text(encoding="utf-8")), replacements)
+            text = json_path.read_text(encoding="utf-8")
+            for old, new in replacements.items():
+                text = text.replace(old, new)
+            data = json.loads(text)
             if isinstance(data, list):
                 merged_json.extend(data)
         if model_path:
-            data = replace_strings(json.loads(model_path.read_text(encoding="utf-8")), replacements)
+            text = model_path.read_text(encoding="utf-8")
+            for old, new in replacements.items():
+                text = text.replace(old, new)
+            data = json.loads(text)
             if isinstance(data, list):
                 merged_model.extend(data)
         if md_path:

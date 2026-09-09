@@ -18,8 +18,16 @@ if [[ -z "$input_path" || ! -e "$input_path" ]]; then
   exit 1
 fi
 
-if ! curl --silent --fail --max-time 2 http://127.0.0.1:8080/health >/dev/null 2>&1; then
-  echo "Локальный сервер не отвечает на порту 8080."
+server_port=8080
+if [[ -f "$PROFILE_FILE" ]]; then
+  saved_port="$(sed -n 's/^SERVER_PORT=//p' "$PROFILE_FILE" | head -1)"
+  if [[ "$saved_port" =~ ^[0-9]+$ ]]; then
+    server_port="$saved_port"
+  fi
+fi
+
+if ! curl --silent --fail --max-time 2 http://127.0.0.1:$server_port/health >/dev/null 2>&1; then
+  echo "Локальный сервер не отвечает на порту $server_port."
   echo "Сначала запустите: $WORK_DIR/start-glm-ocr.command"
   exit 1
 fi

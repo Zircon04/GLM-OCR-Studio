@@ -10,14 +10,19 @@ PROFILE_FILE="$WORK_DIR/config/performance-profile.env"
 
 server_seqs=8
 profile_name="balanced"
+server_port=8080
 if [[ -f "$PROFILE_FILE" ]]; then
   saved_profile="$(sed -n 's/^PROFILE=//p' "$PROFILE_FILE" | head -1)"
   saved_seqs="$(sed -n 's/^SERVER_SEQS=//p' "$PROFILE_FILE" | head -1)"
+  saved_port="$(sed -n 's/^SERVER_PORT=//p' "$PROFILE_FILE" | head -1)"
   if [[ "$saved_profile" == (auto|low|balanced|high|max|extreme|fast) ]]; then
     profile_name="$saved_profile"
   fi
   if [[ "$saved_seqs" == <1-32> ]]; then
     server_seqs="$saved_seqs"
+  fi
+  if [[ "$saved_port" =~ ^[0-9]+$ ]]; then
+    server_port="$saved_port"
   fi
 fi
 
@@ -27,15 +32,15 @@ if [[ -f "$PID_FILE" ]]; then
   pid="$(<"$PID_FILE")"
   if kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o command= | grep -Fq "$SERVER_BIN"; then
     echo "Локальный сервер GLM-OCR уже запущен (PID $pid)."
-    echo "Адрес: http://127.0.0.1:8080"
+    echo "Адрес: http://127.0.0.1:$server_port"
     exit 0
   fi
   rm -f "$PID_FILE"
 fi
 
-if lsof -nP -iTCP:8080 -sTCP:LISTEN >/dev/null 2>&1; then
-  echo "Порт 8080 занят другим процессом. Он не будет остановлен."
-  echo "Освободите порт 8080 либо остановите известный вам процесс и запустите сценарий снова."
+if lsof -nP -iTCP:$server_port -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "Порт $server_port занят другим процессом. Он не будет остановлен."
+  echo "Освободите порт $server_port либо остановите известный вам процесс и запустите сценарий снова."
   exit 1
 fi
 
@@ -49,13 +54,13 @@ echo "Запускаю локальный GLM-OCR с ускорением Apple 
 echo "Профиль нагрузки: $profile_name, параллельных запросов MLX: $server_seqs"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
-nohup "$SERVER_BIN" --host 127.0.0.1 --port 8080 --model "$MODEL" --trust-remote-code --max-num-seqs "$server_seqs" --log-level INFO >> "$LOG_FILE" 2>&1 < /dev/null &!
+nohup "$SERVER_BIN" --host 127.0.0.1 --port "$server_port" --model "$MODEL" --trust-remote-code --max-num-seqs "$server_seqs" --log-level INFO >> "$LOG_FILE" 2>&1 < /dev/null &!
 pid=$!
 echo "$pid" > "$PID_FILE"
 
 for i in {1..45}; do
-  if curl --silent --fail --max-time 2 http://127.0.0.1:8080/health >/dev/null 2>&1; then
-    echo "Сервер готов: http://127.0.0.1:8080"
+  if curl --silent --fail --max-time 2 http://127.0.0.1:$server_port/health >/dev/null 2>&1; then
+    echo "Сервер готов: http://127.0.0.1:$server_port"
     echo "Журнал: $LOG_FILE"
     exit 0
   fi
