@@ -37,10 +37,20 @@ if [[ ! -x "$SDK_PYTHON" || ! -f "$JOB_RUNNER" ]]; then
   exit 1
 fi
 
+printf "Папка для результата (Enter — results): "
+IFS= read -r output_parent
+output_parent="${output_parent/#\~/$HOME}"
+if [[ -z "$output_parent" ]]; then
+  output_parent="$RESULTS_DIR"
+elif [[ ! -d "$output_parent" ]]; then
+  echo "Папки нет: $output_parent"
+  exit 1
+fi
+
 base_name="${input_path:t}"
 safe_name="${base_name:r}"
 timestamp="$(date +%Y%m%d-%H%M%S)"
-output_dir="$RESULTS_DIR/${safe_name}-${timestamp}"
+output_dir="$output_parent/${safe_name}-${timestamp}"
 mkdir -p "$output_dir"
 
 echo "Распознавание запущено. Результат: $output_dir"
@@ -49,7 +59,7 @@ export TRANSFORMERS_OFFLINE=1
 "$SDK_PYTHON" "$JOB_RUNNER" --input "$input_path" --output "$output_dir" --enhance hybrid --exports
 exit_code=$?
 if [[ $exit_code -eq 0 ]]; then
-  echo "Готово. Markdown, JSON, HTML, DOCX, searchable PDF и ZIP сохранены в: $output_dir"
+  echo "Готово. В папке книги — Markdown и изображения, экспорты рядом: $output_dir"
   echo "Если выполнение прервётся, снова запустите тот же путь через приложение: оно продолжит с сохранённого блока."
 else
   echo "Распознавание завершилось с ошибкой (код $exit_code). Проверьте журнал сервера: $WORK_DIR/logs/mlx-vlm.log"
