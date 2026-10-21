@@ -40,6 +40,7 @@ private let resultInfoScript = installDir + "/manager/result_info.py"
 private let libraryScript = installDir + "/manager/library_index.py"
 private let cleanupScript = installDir + "/manager/cleanup_manager.py"
 private let resultsDir = installDir + "/results"
+private let outputDirKey = "GLMOutputDirectory"
 private let logFile = installDir + "/logs/mlx-vlm.log"
 private let profileFile = installDir + "/config/performance-profile.env"
 private let queueFile = installDir + "/manager/queue-state.json"
@@ -142,6 +143,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     private var loadedResult: [String: Any] = [:]
     private var imagePairs: [[String: Any]] = []
     private var cleanupSheet: NSPanel?
+    private var outputFolderLabel: NSTextField!
+
+    private var outputDirectory: String {
+        if let saved = UserDefaults.standard.string(forKey: outputDirKey),
+           FileManager.default.fileExists(atPath: saved) {
+            return saved
+        }
+        return resultsDir
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         totalMemoryGB = detectedMemoryGB()
@@ -164,37 +174,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         window.title = "GLM OCR Local"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
         window.toolbarStyle = .unified
         window.isMovableByWindowBackground = true
-        window.backgroundColor = .windowBackgroundColor
+        window.isOpaque = false
+        window.backgroundColor = .clear
         window.minSize = NSSize(width: 900, height: 680)
         window.center()
         window.delegate = self
 
-        let background = NSVisualEffectView()
-        background.material = .underWindowBackground
-        background.blendingMode = .behindWindow
-        background.state = .followsWindowActiveState
-        background.translatesAutoresizingMaskIntoConstraints = false
-        window.contentView?.addSubview(background)
-        NSLayoutConstraint.activate([
-            background.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor),
-            background.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor),
-            background.topAnchor.constraint(equalTo: window.contentView!.topAnchor),
-            background.bottomAnchor.constraint(equalTo: window.contentView!.bottomAnchor)
-        ])
+        let backdrop = makeSystemGlass(radius: 0) ?? fallbackGlass()
+        backdrop.translatesAutoresizingMaskIntoConstraints = true
+        window.contentView = backdrop
+        let host = glassContent(of: backdrop)
 
         let root = NSStackView()
         root.orientation = .vertical
         root.alignment = .leading
         root.spacing = 12
         root.translatesAutoresizingMaskIntoConstraints = false
-        background.addSubview(root)
+        host.addSubview(root)
         NSLayoutConstraint.activate([
-            root.leadingAnchor.constraint(equalTo: background.leadingAnchor, constant: 24),
-            root.trailingAnchor.constraint(equalTo: background.trailingAnchor, constant: -24),
-            root.topAnchor.constraint(equalTo: background.topAnchor, constant: 50),
-            root.bottomAnchor.constraint(equalTo: background.bottomAnchor, constant: -18)
+            root.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: 24),
+            root.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -24),
+            root.topAnchor.constraint(equalTo: host.topAnchor, constant: 50),
+            root.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -18)
         ])
 
         root.addArrangedSubview(makeHeader())
@@ -301,6 +305,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         root.addArrangedSubview(tools)
         tools.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
 
+        let outputRow = NSStackView()
+        outputRow.orientation = .horizontal
+        outputRow.alignment = .centerY
+        outputRow.spacing = 8
+        let outputTitle = NSTextField(labelWithString: "Папка:")
+        outputTitle.font = .systemFont(ofSize: 12.5, weight: .semibold)
+        outputFolderLabel = NSTextField(labelWithString: outputDirectory)
+        outputFolderLabel.font = .systemFont(ofSize: 12)
+        outputFolderLabel.lineBreakMode = .byTruncatingMiddle
+        outputFolderLabel.textColor = .secondaryLabelColor
+        outputFolderLabel.toolTip = outputDirectory
+        outputFolderLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        outputFolderLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        outputRow.addArrangedSubview(outputTitle)
+        outputRow.addArrangedSubview(outputFolderLabel)
+        outputRow.addArrangedSubview(button("Выбрать…", symbol: "folder.badge.plus", #selector(chooseOutputFolder)))
+        outputRow.addArrangedSubview(button("Сброс", symbol: "arrow.uturn.backward", #selector(resetOutputFolder)))
+        root.addArrangedSubview(outputRow)
+        outputRow.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
+
         queueTable = NSTableView()
         queueTable.delegate = self
         queueTable.dataSource = self
@@ -308,12 +332,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         queueTable.headerView = NSTableHeaderView()
         queueTable.usesAlternatingRowBackgroundColors = true
         queueTable.allowsMultipleSelection = true
+        queueTable.style = .inset
+        queueTable.backgroundColor = .clear
         addColumn(queueTable, id: "name", title: "Документ", width: 430)
         addColumn(queueTable, id: "pages", title: "Страницы", width: 90)
         addColumn(queueTable, id: "status", title: "Состояние", width: 170)
         addColumn(queueTable, id: "progress", title: "Прогресс", width: 150)
         let queueScroll = scrollView(queueTable)
-        queueScroll.borderType = .bezelBorder
         root.addArrangedSubview(queueScroll)
         queueScroll.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
         queueScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 155).isActive = true
@@ -352,7 +377,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         htmlCheckbox = NSButton(checkboxWithTitle: "HTML", target: nil, action: nil)
         docxCheckbox = NSButton(checkboxWithTitle: "DOCX", target: nil, action: nil)
         searchablePDFCheckbox = NSButton(checkboxWithTitle: "С исходным видом", target: nil, action: nil)
-        searchablePDFCheckbox.toolTip = "Исходные страницы без изменений + невидимый слой распознанного текста для поиска и копирования"
+        searchablePDFCheckbox.toolTip = "Исходные страницы и невидимый текстовый слой по координатам блоков. Картинки страниц пережимаются в JPEG (качество 80), текст остаётся векторным."
         cleanPDFCheckbox = NSButton(checkboxWithTitle: "Чистый цифровой", target: nil, action: nil)
         cleanPDFCheckbox.toolTip = "Новый PDF из распознанного текста, таблиц, формул и улучшенных рисунков"
         zipCheckbox = NSButton(checkboxWithTitle: "ZIP", target: nil, action: nil)
@@ -487,11 +512,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         structureView = NSTextView()
         structureView.isEditable = false
         structureView.isRichText = false
+        structureView.drawsBackground = false
         structureView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         structureView.textContainerInset = NSSize(width: 12, height: 12)
         structureView.string = "После OCR здесь появятся типы блоков, формулы, таблицы и исходный JSON."
         let scroll = scrollView(structureView)
-        scroll.borderType = .bezelBorder
         root.addArrangedSubview(scroll)
         scroll.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
         scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 430).isActive = true
@@ -564,11 +589,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         libraryTable.doubleAction = #selector(openLibrarySelection)
         libraryTable.target = self
         libraryTable.usesAlternatingRowBackgroundColors = true
+        libraryTable.style = .inset
+        libraryTable.backgroundColor = .clear
         addColumn(libraryTable, id: "libTitle", title: "Документ", width: 370)
         addColumn(libraryTable, id: "libPages", title: "Страницы", width: 75)
         addColumn(libraryTable, id: "libSource", title: "Исходный файл / совпадение", width: 480)
         let scroll = scrollView(libraryTable)
-        scroll.borderType = .bezelBorder
         root.addArrangedSubview(scroll)
         scroll.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
         scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 430).isActive = true
@@ -584,7 +610,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         image.imageScaling = .scaleProportionallyUpOrDown
         image.wantsLayer = true
         image.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.04).cgColor
-        image.layer?.cornerRadius = 8
+        image.layer?.cornerRadius = 16
         caption = NSTextField(wrappingLabelWithString: "Нет изображения")
         caption.font = .systemFont(ofSize: 11)
         caption.textColor = .secondaryLabelColor
@@ -611,6 +637,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let fileMenu = NSMenu(title: "Файл")
         let add = fileMenu.addItem(withTitle: "Добавить документы…", action: #selector(chooseInput), keyEquivalent: "o")
         add.target = self
+        let output = fileMenu.addItem(withTitle: "Папка результатов…", action: #selector(chooseOutputFolder), keyEquivalent: "d")
+        output.target = self
         fileMenu.addItem(.separator())
         let cleanup = fileMenu.addItem(withTitle: "Очистить…", action: #selector(showCleanup), keyEquivalent: "k")
         cleanup.target = self
@@ -644,7 +672,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 let stamp = Self.timestamp.string(from: Date())
                 let unique = UUID().uuidString.prefix(6)
                 let stem = safeFilename(source.deletingPathExtension().lastPathComponent)
-                let output = URL(fileURLWithPath: resultsDir).appendingPathComponent("\(stem)-\(stamp)-\(unique)").path
+                let output = URL(fileURLWithPath: outputDirectory).appendingPathComponent("\(stem)-\(stamp)-\(unique)").path
                 let pages = source.pathExtension.lowercased() == "pdf" ? (PDFDocument(url: source)?.pageCount ?? 0) : 1
                 queue.append(QueueItem(id: UUID(), source: source.path, output: output, status: "pending", progress: 0,
                                        pagesDone: 0, pagesTotal: pages, etaSeconds: nil, message: "Ожидает", addedAt: Date()))
@@ -876,6 +904,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             let withinFormat = min(1, Double(pagesDone) / Double(pagesTotal))
             queue[row].progress = enhancementEnd + exportShare * (Double(formatDone) + withinFormat) / Double(formatTotal)
             queue[row].message = "Чистый PDF: страница \(pagesDone) из \(pagesTotal)"
+        case "searchable_pdf_progress":
+            let pagesDone = event["pages_done"] as? Int ?? 0
+            let pagesTotal = max(1, event["pages_total"] as? Int ?? 1)
+            let formatDone = event["format_done"] as? Int ?? 0
+            let formatTotal = max(1, event["format_total"] as? Int ?? 1)
+            let withinFormat = min(1, Double(pagesDone) / Double(pagesTotal))
+            queue[row].progress = enhancementEnd + exportShare * (Double(formatDone) + withinFormat) / Double(formatTotal)
+            queue[row].message = "PDF с текстом: страница \(pagesDone) из \(pagesTotal)"
         case "export_progress":
             let format = event["format"] as? String ?? ""
             let done = event["done"] as? Int ?? 0
@@ -1051,29 +1087,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         guard cleanupSheet == nil else { return }
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 680, height: 410),
                             styleMask: [.titled], backing: .buffered, defer: false)
+        panel.titlebarAppearsTransparent = true
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
         panel.title = "Очистка"
         panel.isReleasedWhenClosed = false
         panel.animationBehavior = .documentWindow
         panel.minSize = NSSize(width: 680, height: 410)
         panel.maxSize = NSSize(width: 680, height: 410)
 
-        let background = NSVisualEffectView()
-        background.material = .underWindowBackground
-        background.blendingMode = .behindWindow
-        background.state = .followsWindowActiveState
+        let background = makeSystemGlass(radius: 0) ?? fallbackGlass()
+        background.translatesAutoresizingMaskIntoConstraints = true
         panel.contentView = background
+        let host = glassContent(of: background)
 
         let root = NSStackView()
         root.orientation = .vertical
         root.alignment = .leading
         root.spacing = 16
         root.translatesAutoresizingMaskIntoConstraints = false
-        background.addSubview(root)
+        host.addSubview(root)
         NSLayoutConstraint.activate([
-            root.leadingAnchor.constraint(equalTo: background.leadingAnchor, constant: 28),
-            root.trailingAnchor.constraint(equalTo: background.trailingAnchor, constant: -28),
-            root.topAnchor.constraint(equalTo: background.topAnchor, constant: 24),
-            root.bottomAnchor.constraint(equalTo: background.bottomAnchor, constant: -22)
+            root.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: 28),
+            root.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -28),
+            root.topAnchor.constraint(equalTo: host.topAnchor, constant: 24),
+            root.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -22)
         ])
 
         let header = NSStackView()
@@ -1541,7 +1579,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         NSWorkspace.shared.open(URL(fileURLWithPath: library[row].path))
     }
 
-    @objc private func openResults() { NSWorkspace.shared.open(URL(fileURLWithPath: resultsDir)) }
+    @objc private func chooseOutputFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "Куда сохранять результаты"
+        panel.prompt = "Выбрать"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: outputDirectory, isDirectory: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let previous = outputDirectory
+        UserDefaults.standard.set(url.path, forKey: outputDirKey)
+        retargetPendingOutputs(from: previous)
+        showOutputDirectory()
+    }
+
+    @objc private func resetOutputFolder() {
+        let previous = outputDirectory
+        UserDefaults.standard.removeObject(forKey: outputDirKey)
+        retargetPendingOutputs(from: previous)
+        showOutputDirectory()
+    }
+
+    private func retargetPendingOutputs(from previous: String) {
+        let oldRoot = URL(fileURLWithPath: previous).standardizedFileURL.path
+        let newRoot = URL(fileURLWithPath: outputDirectory).standardizedFileURL.path
+        guard oldRoot != newRoot else { return }
+        for index in queue.indices where queue[index].status == "pending" {
+            let url = URL(fileURLWithPath: queue[index].output).standardizedFileURL
+            if url.deletingLastPathComponent().path == oldRoot {
+                queue[index].output = URL(fileURLWithPath: newRoot).appendingPathComponent(url.lastPathComponent).path
+            }
+        }
+        saveQueue()
+        queueTable?.reloadData()
+    }
+
+    private func showOutputDirectory() {
+        outputFolderLabel?.stringValue = outputDirectory
+        outputFolderLabel?.toolTip = outputDirectory
+    }
+
+    @objc private func openResults() { NSWorkspace.shared.open(URL(fileURLWithPath: outputDirectory)) }
     @objc private func openLoadedResult() {
         let root = loadedResult["root"] as? String ?? resultsDir
         NSWorkspace.shared.open(URL(fileURLWithPath: root))
@@ -1709,14 +1789,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         }
     }
 
-    private func card() -> NSVisualEffectView {
-        let v = NSVisualEffectView(); v.material = .contentBackground; v.blendingMode = .withinWindow; v.state = .followsWindowActiveState
-        v.wantsLayer = true; v.layer?.cornerRadius = 11; v.layer?.cornerCurve = .continuous; v.layer?.borderWidth = 0.5; v.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.35).cgColor
-        return v
+    private func card() -> NSView {
+        if let glass = makeSystemGlass(radius: 18) { return glass }
+        return fallbackGlass(radius: 18)
     }
+
+    /// На macOS 26 это настоящее Liquid Glass. На 14–15 тот же рисунок из материала окна.
+    private func makeSystemGlass(radius: CGFloat) -> NSView? {
+        guard let kind = NSClassFromString("NSGlassEffectView") as? NSView.Type else { return nil }
+        let view = kind.init(frame: .zero)
+        if view.responds(to: NSSelectorFromString("setCornerRadius:")) {
+            view.setValue(radius, forKey: "cornerRadius")
+        }
+        if view.responds(to: NSSelectorFromString("setStyle:")) {
+            view.setValue(0, forKey: "style")
+        }
+        return view
+    }
+
+    private func glassContent(of view: NSView) -> NSView {
+        guard view.responds(to: NSSelectorFromString("contentView")) else { return view }
+        if let content = view.value(forKey: "contentView") as? NSView { return content }
+        let inner = NSView(frame: view.bounds)
+        view.setValue(inner, forKey: "contentView")
+        return (view.value(forKey: "contentView") as? NSView) ?? view
+    }
+
+    private func fallbackGlass(radius: CGFloat = 0) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = .popover
+        view.blendingMode = .behindWindow
+        view.state = .followsWindowActiveState
+        view.wantsLayer = true
+        if radius > 0 {
+            view.layer?.cornerRadius = radius
+            view.layer?.cornerCurve = .continuous
+            view.layer?.masksToBounds = true
+            view.layer?.borderWidth = 0.8
+            view.layer?.borderColor = NSColor.white.withAlphaComponent(0.32).cgColor
+        }
+        return view
+    }
+
     private func cardStack(in card: NSView) -> NSStackView {
-        let s = NSStackView(); s.orientation = .vertical; s.alignment = .leading; s.spacing = 8; s.translatesAutoresizingMaskIntoConstraints = false; card.addSubview(s)
-        NSLayoutConstraint.activate([s.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 13), s.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -13), s.topAnchor.constraint(equalTo: card.topAnchor, constant: 10), s.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -10)])
+        let host = glassContent(of: card)
+        let s = NSStackView(); s.orientation = .vertical; s.alignment = .leading; s.spacing = 8; s.translatesAutoresizingMaskIntoConstraints = false; host.addSubview(s)
+        NSLayoutConstraint.activate([s.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: 14), s.trailingAnchor.constraint(equalTo: host.trailingAnchor, constant: -14), s.topAnchor.constraint(equalTo: host.topAnchor, constant: 12), s.bottomAnchor.constraint(equalTo: host.bottomAnchor, constant: -12)])
         return s
     }
     private func button(_ title: String, symbol name: String? = nil, _ action: Selector, prominent: Bool = false) -> NSButton {
@@ -1728,7 +1846,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     private func iconButton(_ name: String, _ help: String, _ action: Selector) -> NSButton { let b = button("", symbol: name, action); b.toolTip = help; b.imagePosition = .imageOnly; return b }
     private func symbol(_ name: String, color: NSColor) -> NSImage { let image = NSImage(systemSymbolName: name, accessibilityDescription: nil) ?? NSImage(); return image.withSymbolConfiguration(.init(paletteColors: [color])) ?? image }
     private func tabItem(_ title: String, view: NSView) -> NSTabViewItem { let item = NSTabViewItem(); item.label = title; item.view = view; return item }
-    private func scrollView(_ document: NSView) -> NSScrollView { let s = NSScrollView(); s.hasVerticalScroller = true; s.hasHorizontalScroller = false; s.autohidesScrollers = true; s.documentView = document; return s }
+    private func scrollView(_ document: NSView) -> NSScrollView {
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        scroll.documentView = document
+        scroll.wantsLayer = true
+        scroll.layer?.cornerRadius = 16
+        scroll.layer?.cornerCurve = .continuous
+        scroll.layer?.masksToBounds = true
+        scroll.layer?.borderWidth = 0.6
+        scroll.layer?.borderColor = NSColor.white.withAlphaComponent(0.22).cgColor
+        return scroll
+    }
     private func addColumn(_ table: NSTableView, id: String, title: String, width: CGFloat) { let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id)); c.title = title; c.width = width; c.minWidth = min(width, 60); table.addTableColumn(c) }
 
     private func supported(_ url: URL) -> Bool { ["pdf", "png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"].contains(url.pathExtension.lowercased()) }
