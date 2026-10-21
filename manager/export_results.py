@@ -11,7 +11,7 @@ import subprocess
 import sys
 import zipfile
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 from searchable_pdf import make_searchable_pdf
 
@@ -26,6 +26,52 @@ def emit(kind: str, **payload) -> None:
 def find_file(root: Path, suffix: str, exclude: str = "") -> Path | None:
     files = [p for p in root.rglob(f"*{suffix}") if not exclude or exclude not in p.name]
     return sorted(files, key=lambda p: len(p.parts))[0] if files else None
+
+
+_LITERAL = re.compile(r"(```.*?```|\$\$.*?\$\$|`[^`\n]*`|\$[^$\n]+\$)", re.DOTALL)
+_MD_IMG = re.compile(r"(!?\[[^\]]*\]\()([^)\s]+)(\))")
+_HTML_IMG = re.compile(r"(<img\b[^>]*\bsrc=[\"'])([^\"']+)([\"'])", re.IGNORECASE)
+CLI_EXPORTS = {"md", "split_md", "searchable_pdf"}
+INTERNAL_EXPORTS = CLI_EXPORTS | {"html", "docx", "clean_pdf", "zip"}
+
+
+def _rewrite_piece(piece: str, source_dir: Path, dest_dir: Path) -> str:
+    def retarget(raw: str) -> str:
+        parts = urlsplit(raw)
+        if parts.scheme in {"http", "https", "data", "mailto"} or raw.startswith("#"):
+            return raw
+        decoded = unquote(parts.path)
+        if not decoded or decoded.startswith("/"):
+            return raw
+        target = (source_dir / decoded).resolve()
+        relative = Path(os_rel(target, dest_dir)).as_posix()
+        return quote(relative, safe="/-._~") + (f"?{parts.query}" if parts.query else "")
+
+    def md(match: re.Match[str]) -> str:
+        return match.group(1) + retarget(match.group(2)) + match.group(3)
+
+    def html_img(match: re.Match[str]) -> str:
+        return match.group(1) + retarget(match.group(2)) + match.group(3)
+
+    return _HTML_IMG.sub(html_img, _MD_IMG.sub(md, piece))
+
+
+def os_rel(target: Path, start: Path) -> str:
+    import os
+    return os.path.relpath(target, start)
+
+
+def rewrite_image_links(markdown: str, source_dir: Path, dest_file: Path) -> str:
+    """Пути картинок считаются от файла, куда пишется Markdown.
+
+    Формулы и код остаются как есть. Исходные ссылки ищутся от папки книги.
+    """
+    parts = _LITERAL.split(markdown)
+    dest_dir = dest_file.parent
+    return "".join(
+        part if index % 2 else _rewrite_piece(part, source_dir, dest_dir)
+        for index, part in enumerate(parts)
+    )
 
 
 def markdown_to_html(markdown: str, base: str) -> str:
@@ -177,9 +223,9 @@ def main() -> int:
     parser.add_argument("--result", required=True)
     parser.add_argument("--source", required=True)
     parser.add_argument("--output-root", required=True)
-    parser.add_argument("--formats", default="md,split_md,html,docx,searchable_pdf,clean_pdf,zip")
+    parser.add_argument("--formats", default="md,split_md,searchable_pdf")
     parser.add_argument("--downsample-dpi", type=int, default=None, help="DPI картинок страницы. Пусто — не менять размер.")
-    parser.add_argument("--jpeg-quality", type=int, default=None, help="JPEG 1–95. 0 — не пережимать. По умолчанию 80.")
+    parser.add_argument("--jpeg-quality", type=int, default=0, help="JPEG 1–95. 0 — не пережимать. По умолчанию 0.")
     parser.add_argument("--force-grayscale", action="store_true", help="Перевести картинки страниц в оттенки серого.")
     parser.add_argument("--overlay-crops", action="store_true", help="Наложить вырезанные моделью фигуры поверх скана.")
     args = parser.parse_args()
@@ -187,8 +233,14 @@ def main() -> int:
     source = Path(args.source)
     output_root = Path(args.output_root)
     requested = [item.strip() for item in args.formats.split(",") if item.strip()]
-    allowed = {"md", "split_md", "html", "docx", "searchable_pdf", "clean_pdf", "zip"}
-    formats = [item for item in requested if item in allowed]
+    if not requested:
+        emit("export_error", message="Список форматов пуст")
+        return 2
+    unknown = [item for item in requested if item not in INTERNAL_EXPORTS]
+    if unknown:
+        emit("export_error", message="Неизвестный формат: " + ", ".join(unknown))
+        return 2
+    formats = requested
     exports = output_root / "exports"
     exports.mkdir(parents=True, exist_ok=True)
     markdown_path = find_file(result, "_enhanced.md") or find_file(result, ".md", "_enhanced")
@@ -208,10 +260,12 @@ def main() -> int:
         path: Path | None = None
         if format_name == "md":
             path = exports / f"{base}.md"
-            path.write_text(markdown, encoding="utf-8")
+            path.write_text(rewrite_image_links(markdown, result, path), encoding="utf-8")
         elif format_name == "split_md":
             path = exports / f"{base}_chapters"
             make_split_md(markdown, path)
+            for chapter in path.glob("*.md"):
+                chapter.write_text(rewrite_image_links(chapter.read_text(encoding="utf-8"), result, chapter), encoding="utf-8")
         elif format_name == "html":
             path = exports / f"{base}.html"
             path.write_text(markdown_to_html(markdown, base), encoding="utf-8")
@@ -241,8 +295,7 @@ def main() -> int:
                 }
                 if args.downsample_dpi is not None:
                     kwargs["downsample_dpi"] = args.downsample_dpi
-                if args.jpeg_quality is not None:
-                    kwargs["jpeg_quality"] = args.jpeg_quality
+                kwargs["jpeg_quality"] = args.jpeg_quality
                 make_searchable_pdf(source, json_path, path, **kwargs)
             except Exception as exc:
                 emit("export_error", format=format_name, message=f"Searchable PDF: {exc}")

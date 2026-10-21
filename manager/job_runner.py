@@ -12,16 +12,19 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 import zipfile
 import unicodedata
 import codecs
 import hashlib
 import psutil
+import pymupdf
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from normalize_ocr_md import normalize_text
+from optimize_images import optimize_tree
 
 INSTALL_DIR = Path(__file__).resolve().parent.parent
 GLMOCR = (
@@ -95,25 +98,88 @@ def chunk_size_for(profile: dict[str, int | str]) -> int:
     return min(32, base * 2)
 
 
-def memory_free_percent() -> int | None:
+CLI_EXPORTS = ("md", "split_md", "searchable_pdf")
+
+
+def parse_export_formats(raw: str) -> list[str]:
+    """Три формата обычного запуска. Пустой и неизвестный список — ошибка."""
+    items = [item.strip() for item in str(raw).split(",") if item.strip()]
+    if not items:
+        raise ValueError("Список форматов пуст")
+    unknown = [item for item in items if item not in CLI_EXPORTS]
+    if unknown:
+        raise ValueError("Неизвестный формат: " + ", ".join(unknown))
+    return items
+
+
+def memory_snapshot() -> tuple[int, int] | None:
+    """Доступные и всего байты. None, если телеметрию прочитать нельзя."""
     try:
-        return int(100 - psutil.virtual_memory().percent)
+        memory = psutil.virtual_memory()
+        return int(memory.available), int(memory.total)
     except Exception:
         return None
 
 
-def wait_for_memory() -> None:
+def memory_free_percent() -> int | None:
+    snap = memory_snapshot()
+    if snap is None or snap[1] <= 0:
+        return None
+    return int(snap[0] * 100 / snap[1])
+
+
+def admission_floor(total_bytes: int, reserve_gb: int) -> int:
+    """Сколько байт должно быть свободно: резерв пользователя и 10% ОЗУ."""
+    reserve = max(0, int(reserve_gb)) * 1024 ** 3
+    return max(reserve, int(max(0, total_bytes) * 0.10))
+
+
+def memory_allows_block(reserve_gb: int, available: int | None = None, total: int | None = None) -> bool | None:
+    """True — блок можно брать. False — рано. None — память не прочиталась."""
+    if total is not None and total <= 0:
+        return None
+    if available is None or total is None:
+        snap = memory_snapshot()
+        if snap is None:
+            return None
+        if available is None:
+            available = snap[0]
+        if total is None:
+            total = snap[1]
+    if available < 0 or total <= 0:
+        return None
+    return available >= admission_floor(total, reserve_gb)
+
+
+def wait_for_memory() -> bool:
+    """Ждёт допуск по реальным байтам. False — пауза пришла во время ожидания.
+
+    Заданный резерв здесь не уменьшается. Если память не читается, проверка
+    повторяется, а не пропускается.
+    """
     profile = read_profile()
     reserve = int(profile.get("reserved", 5))
-    total = max(1, int(profile.get("memory", 16)))
-    minimum_free = max(10, int(reserve / total * 100))
     while not cancelled:
-        free = memory_free_percent()
-        if free is None or free >= minimum_free:
-            return
-        emit("memory_wait", free_percent=free, minimum_percent=minimum_free,
-             message="Память занята; следующий блок подождёт, чтобы macOS оставалась отзывчивой")
-        time.sleep(5)
+        allowed = memory_allows_block(reserve)
+        if allowed is True:
+            return not cancelled
+        if allowed is None:
+            emit(
+                "memory_wait",
+                message="Не удалось прочитать свободную память; повторю проверку",
+            )
+        else:
+            free = memory_free_percent()
+            emit(
+                "memory_wait",
+                free_percent=free if free is not None else 0,
+                message="Память занята; следующий блок подождёт, чтобы macOS оставалась отзывчивой",
+            )
+        for _ in range(50):
+            if cancelled:
+                return False
+            time.sleep(0.1)
+    return False
 
 
 def local_server_alive() -> bool:
@@ -495,12 +561,19 @@ def normalize_book_markdown(final_dir: Path, base: str) -> None:
 
 
 def finalize_book_dir(final_dir: Path, base: str) -> None:
-    """В папке книги остаются только Markdown и каталог извлечённых изображений."""
+    """В папке книги остаются Markdown, исходные и улучшенные изображения.
+
+    Улучшенный Markdown, если он есть, становится основным до очистки.
+    """
     if not final_dir.is_dir():
         return
-    keep_md = f"{base}.md"
+    enhanced = final_dir / f"{base}_enhanced.md"
+    main_md = final_dir / f"{base}.md"
+    if enhanced.is_file():
+        main_md.write_text(enhanced.read_text(encoding="utf-8"), encoding="utf-8")
+    keep_names = {f"{base}.md", "imgs", "imgs_enhanced"}
     for child in list(final_dir.iterdir()):
-        if child.name == keep_md or (child.name == "imgs" and child.is_dir() and not child.is_symlink()):
+        if child.name in keep_names and (child.is_file() or (child.is_dir() and not child.is_symlink())):
             continue
         if child.is_symlink() or child.is_file():
             child.unlink(missing_ok=True)
@@ -556,7 +629,7 @@ def run_job(args: argparse.Namespace) -> int:
     state_path = output_root / "job-state.json"
     profile = read_profile()
     result_name = safe_name(source.stem if source.is_file() else source.name)
-    export_formats = args.export_formats if args.exports else ""
+    export_formats = ",".join(parse_export_formats(args.export_formats)) if args.exports else ""
 
     if state_path.exists():
         state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -574,6 +647,7 @@ def run_job(args: argparse.Namespace) -> int:
         state["enhancement"] = args.enhance
         state["exports"] = args.exports
         state["export_formats"] = export_formats
+        state["profile"] = profile
         adopt_saved_progress(state, output_root)
         if any(chunk.get("merged") and not chunk.get("purged") for chunk in state.get("chunks", [])):
             kept = output_root / state["result_name"]
@@ -607,7 +681,8 @@ def run_job(args: argparse.Namespace) -> int:
             break
         if chunk["status"] == "done":
             continue
-        wait_for_memory()
+        if not wait_for_memory() or cancelled:
+            break
         chunk_output = work_root / chunk["id"]
         chunk_output.mkdir(parents=True, exist_ok=True)
         chunk["status"] = "running"
@@ -677,7 +752,9 @@ def run_job(args: argparse.Namespace) -> int:
         ]
         if getattr(args, "pdf_downsample_dpi", None):
             export_cmd.extend(["--downsample-dpi", str(args.pdf_downsample_dpi)])
-        if getattr(args, "pdf_jpeg_quality", None) is not None:
+        if getattr(args, "pdf_jpeg_quality", None) is None:
+            export_cmd.extend(["--jpeg-quality", "0"])
+        else:
             export_cmd.extend(["--jpeg-quality", str(args.pdf_jpeg_quality)])
         if getattr(args, "pdf_grayscale", False):
             export_cmd.append("--force-grayscale")
@@ -689,13 +766,45 @@ def run_job(args: argparse.Namespace) -> int:
             emit("job_paused", message="Экспорт приостановлен", **progress_payload(state))
             return 130
         if code != 0:
-            emit("log", level="warning", message="Основной результат готов, но часть экспортов не создана")
+            state["status"] = "error"
+            state["stage"] = "export"
+            state["error"] = f"Экспорт завершился с кодом {code}. Распознанный текст сохранён, экспорт можно повторить."
+            state["updated_at"] = time.time()
+            atomic_json(state_path, state)
+            emit("error", message=state["error"], **progress_payload(state))
+            return code or 1
 
     final_dir = Path(state.get("final_dir") or (output_root / state["result_name"]))
+    state["stage"] = "optimize"
+    atomic_json(state_path, state)
+    emit("stage", stage="optimize", message="Упаковываю изображения без потери качества")
+    image_paths = [
+        path for path in final_dir.rglob("*")
+        if path.is_file() and path.suffix.lower() == ".png" and path.parent.name in {"imgs", "imgs_enhanced"}
+    ]
+    emit("optimize_started", total=len(image_paths))
+
+    def on_optimize(done: int, total: int, name: str) -> None:
+        emit("optimize_progress", done=done, total=total, image=name)
+
+    try:
+        stats = optimize_tree(output_root, progress=on_optimize)
+    except Exception as exc:
+        state["status"] = "error"
+        state["error"] = f"Оптимизация изображений не закончилась: {exc}. Данные сохранены, этап можно повторить."
+        atomic_json(state_path, state)
+        emit("error", message=state["error"], **progress_payload(state))
+        return 1
+    emit(
+        "optimize_done",
+        saved_bytes=int(stats.get("saved_bytes", 0)),
+        converted=int(stats.get("converted", 0)),
+    )
+
     remove_job_dir(output_root)
     finalize_book_dir(final_dir, state["result_name"])
     refresh_export_zip(output_root)
-    emit("log", level="info", message="В папке книги оставлены только Markdown и извлечённые изображения")
+    emit("log", level="info", message="В папке книги оставлены Markdown и изображения")
 
     state["stage"] = "complete"
     state["status"] = "complete"
@@ -713,9 +822,9 @@ def main() -> int:
     parser.add_argument("--output", required=True)
     parser.add_argument("--enhance", choices=("off", "safe", "hybrid"), default="hybrid")
     parser.add_argument("--exports", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--export-formats", default="html,docx,searchable_pdf,clean_pdf,zip")
+    parser.add_argument("--export-formats", default="md,split_md,searchable_pdf")
     parser.add_argument("--pdf-downsample-dpi", type=int, default=None, help="Уменьшить картинки searchable PDF до этого DPI.")
-    parser.add_argument("--pdf-jpeg-quality", type=int, default=None, help="Качество JPEG в searchable PDF (0 — не пережимать).")
+    parser.add_argument("--pdf-jpeg-quality", type=int, default=None, help="Качество JPEG в searchable PDF (0 — не пережимать). По умолчанию 0.")
     parser.add_argument("--pdf-grayscale", action="store_true", help="Серые картинки в searchable PDF.")
     parser.add_argument("--pdf-overlay-crops", action="store_true", help="Наложить кропы фигур поверх скана.")
     parser.add_argument("--chunk-size", type=int, help="Размер возобновляемого блока PDF (по умолчанию автоматически)")

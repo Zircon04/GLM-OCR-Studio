@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import Foundation
+import ImageIO
 import PDFKit
 import WebKit
 
@@ -113,11 +114,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     private var enhancementModePopup: NSPopUpButton!
     private var fullMDCheckbox: NSButton!
     private var splitMDCheckbox: NSButton!
-    private var htmlCheckbox: NSButton!
-    private var docxCheckbox: NSButton!
     private var searchablePDFCheckbox: NSButton!
-    private var cleanPDFCheckbox: NSButton!
-    private var zipCheckbox: NSButton!
     private var autoStopCheckbox: NSButton!
     private var structureMode: NSSegmentedControl!
     private var librarySearch: NSSearchField!
@@ -374,21 +371,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         formatsTitle.font = .systemFont(ofSize: 12.5, weight: .semibold)
         fullMDCheckbox = NSButton(checkboxWithTitle: "MD (полный)", target: nil, action: nil)
         splitMDCheckbox = NSButton(checkboxWithTitle: "MD (по главам)", target: nil, action: nil)
-        htmlCheckbox = NSButton(checkboxWithTitle: "HTML", target: nil, action: nil)
-        docxCheckbox = NSButton(checkboxWithTitle: "DOCX", target: nil, action: nil)
-        searchablePDFCheckbox = NSButton(checkboxWithTitle: "С исходным видом", target: nil, action: nil)
-        searchablePDFCheckbox.toolTip = "Исходные страницы и невидимый текстовый слой по координатам блоков. Картинки страниц пережимаются в JPEG (качество 80), текст остаётся векторным."
-        cleanPDFCheckbox = NSButton(checkboxWithTitle: "Чистый цифровой", target: nil, action: nil)
-        cleanPDFCheckbox.toolTip = "Новый PDF из распознанного текста, таблиц, формул и улучшенных рисунков"
-        zipCheckbox = NSButton(checkboxWithTitle: "ZIP", target: nil, action: nil)
-        for checkbox in [fullMDCheckbox, splitMDCheckbox, htmlCheckbox, docxCheckbox, searchablePDFCheckbox, cleanPDFCheckbox, zipCheckbox] {
+        searchablePDFCheckbox = NSButton(checkboxWithTitle: "PDF с поиском", target: nil, action: nil)
+        searchablePDFCheckbox.toolTip = "Исходные страницы без пережатия и невидимый текстовый слой по координатам блоков."
+        for checkbox in [fullMDCheckbox, splitMDCheckbox, searchablePDFCheckbox] {
             checkbox?.state = .on
         }
         formatsRow.addArrangedSubview(formatsTitle)
         formatsRow.addArrangedSubview(fullMDCheckbox)
         formatsRow.addArrangedSubview(splitMDCheckbox)
-        formatsRow.addArrangedSubview(htmlCheckbox)
-        formatsRow.addArrangedSubview(docxCheckbox)
+        formatsRow.addArrangedSubview(searchablePDFCheckbox)
         formatsRow.addArrangedSubview(NSView())
         settings.addArrangedSubview(formatsRow)
         formatsRow.widthAnchor.constraint(equalTo: settings.widthAnchor).isActive = true
@@ -401,9 +392,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         pdfTitle.font = .systemFont(ofSize: 12.5, weight: .semibold)
         pdfTitle.widthAnchor.constraint(equalToConstant: 55).isActive = true
         pdfRow.addArrangedSubview(pdfTitle)
-        pdfRow.addArrangedSubview(searchablePDFCheckbox)
-        pdfRow.addArrangedSubview(cleanPDFCheckbox)
-        pdfRow.addArrangedSubview(zipCheckbox)
+        pdfRow.addArrangedSubview(NSTextField(labelWithString: "Исходный скан и невидимый текст"))
         pdfRow.addArrangedSubview(NSView())
         settings.addArrangedSubview(pdfRow)
         pdfRow.widthAnchor.constraint(equalTo: settings.widthAnchor).isActive = true
@@ -478,8 +467,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         bar.addArrangedSubview(title)
         bar.addArrangedSubview(NSView())
         for (name, icon, selector) in [
-            ("HTML", "safari", #selector(openHTML)), ("DOCX", "doc.richtext", #selector(openDOCX)),
-            ("PDF", "doc.text", #selector(openSearchablePDF)), ("ZIP", "archivebox", #selector(openZIP))
+            ("MD", "doc.plaintext", #selector(openMarkdown)),
+            ("Главы", "list.bullet", #selector(openChapters)),
+            ("PDF", "doc.text", #selector(openSearchablePDF))
         ] {
             let b = button(name, symbol: icon, selector)
             b.isEnabled = false
@@ -824,10 +814,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         if let eta = event["eta_seconds"] as? Int { queue[row].etaSeconds = eta }
         let enhancementEnabled = enhanceCheckbox.state == .on
         let exportEnabled = !selectedExportFormats().isEmpty
-        let enhancementShare = enhancementEnabled ? 0.12 : 0.0
-        let exportShare = exportEnabled ? 0.10 : 0.0
-        let ocrEnd = 1.0 - enhancementShare - exportShare
+        let enhancementShare = enhancementEnabled ? 0.10 : 0.0
+        let exportShare = exportEnabled ? 0.08 : 0.0
+        let optimizeShare = 0.06
+        let ocrEnd = 1.0 - enhancementShare - exportShare - optimizeShare
         let enhancementEnd = ocrEnd + enhancementShare
+        let exportEnd = enhancementEnd + exportShare
         func ocrProgress() {
             if let fraction = event["fraction"] as? Double {
                 queue[row].progress = min(ocrEnd, max(0, fraction) * ocrEnd)
@@ -877,6 +869,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 queue[row].etaSeconds = nil
                 queue[row].progress = max(queue[row].progress, enhancementEnd)
                 queue[row].message = "Экспорт результатов"
+            } else if stage == "optimize" {
+                queue[row].etaSeconds = nil
+                queue[row].progress = max(queue[row].progress, exportEnd)
+                queue[row].message = "Оптимизация изображений"
             }
         case "enhancement_total":
             let total = event["total"] as? Int ?? 0
@@ -896,6 +892,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             let total = max(1, event["total"] as? Int ?? 1)
             queue[row].progress = enhancementEnd + exportShare * Double(done) / Double(total)
             queue[row].message = "Создаю: \(formatTitle(format))"
+        case "optimize_started":
+            let total = event["total"] as? Int ?? 0
+            queue[row].progress = max(queue[row].progress, exportEnd)
+            queue[row].message = total > 0 ? "Оптимизация картинок: 0 из \(total)" : "Картинки для упаковки не найдены"
+        case "optimize_progress":
+            let done = event["done"] as? Int ?? 0
+            let total = max(1, event["total"] as? Int ?? 1)
+            queue[row].progress = exportEnd + optimizeShare * min(1, Double(done) / Double(total))
+            queue[row].message = "Оптимизация картинок: \(done) из \(total)"
+        case "optimize_done":
+            let saved = event["saved_bytes"] as? Int ?? 0
+            queue[row].progress = max(queue[row].progress, exportEnd + optimizeShare)
+            let megabytes = Double(saved) / 1_048_576
+            queue[row].message = saved > 0 ? String(format: "Картинки легче на %.1f МБ", megabytes) : "Картинки уже компактные"
+            append(saved > 0 ? String(format: "✓ Изображения упакованы без потери пикселей, −%.1f МБ.\n", megabytes) : "✓ Упаковка изображений ничего не изменила.\n")
         case "clean_pdf_progress":
             let pagesDone = event["pages_done"] as? Int ?? 0
             let pagesTotal = max(1, event["pages_total"] as? Int ?? 1)
@@ -1505,7 +1516,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             previewWeb.loadHTMLString(emptyPreviewHTML("Предпросмотр ещё не создан."), baseURL: nil)
         }
         let paths = loadedResult["exports"] as? [String] ?? []
-        for (index, ext) in ["html", "docx", "pdf", "zip"].enumerated() { exportButtons[index].isEnabled = paths.contains { $0.lowercased().hasSuffix(".\(ext)") } }
+        let markers = [".md", "_chapters", ".pdf"]
+        for (index, marker) in markers.enumerated() where exportButtons.indices.contains(index) {
+            exportButtons[index].isEnabled = paths.contains { $0.lowercased().contains(marker) || URL(fileURLWithPath: $0).lastPathComponent.lowercased().hasSuffix(marker) }
+        }
     }
 
     @objc private func structureModeChanged() { updateStructure() }
@@ -1537,6 +1551,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         showImagePair(0)
     }
 
+    private func loadPreviewImage(_ path: String) -> NSImage? {
+        guard !path.isEmpty, FileManager.default.fileExists(atPath: path) else { return nil }
+        let url = URL(fileURLWithPath: path) as CFURL
+        if let source = CGImageSourceCreateWithURL(url, nil),
+           let image = CGImageSourceCreateImageAtIndex(source, 0, nil) {
+            return NSImage(cgImage: image, size: .zero)
+        }
+        return NSImage(contentsOfFile: path)
+    }
+
     @objc private func imageChanged() { showImagePair(imagePopup.indexOfSelectedItem) }
     private func showImagePair(_ index: Int) {
         guard imagePairs.indices.contains(index) else {
@@ -1545,8 +1569,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let pair = imagePairs[index]
         let original = pair["original"] as? String ?? ""
         let enhanced = pair["enhanced"] as? String ?? ""
-        originalImage.image = NSImage(contentsOfFile: original)
-        enhancedImage.image = NSImage(contentsOfFile: enhanced)
+        originalImage.image = loadPreviewImage(original)
+        enhancedImage.image = loadPreviewImage(enhanced)
         originalCaption.stringValue = original
         enhancedCaption.stringValue = enhanced.isEmpty ? "Для этого изображения улучшенная копия не создавалась" : "\(enhanced)\n\(pair["method"] as? String ?? "")"
         compareChanged()
@@ -1626,10 +1650,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let root = loadedResult["root"] as? String ?? resultsDir
         NSWorkspace.shared.open(URL(fileURLWithPath: root))
     }
-    @objc private func openHTML() { openExport(".html") }
-    @objc private func openDOCX() { openExport(".docx") }
+    @objc private func openMarkdown() { openExport(".md") }
+    @objc private func openChapters() {
+        guard let paths = loadedResult["exports"] as? [String],
+              let path = paths.first(where: { $0.contains("_chapters") }) else { return }
+        NSWorkspace.shared.open(URL(fileURLWithPath: path))
+    }
     @objc private func openSearchablePDF() { openExport(".pdf") }
-    @objc private func openZIP() { openExport(".zip") }
     private func openExport(_ suffix: String) {
         guard let paths = loadedResult["exports"] as? [String], let path = paths.first(where: { $0.lowercased().hasSuffix(suffix) }) else { return }
         NSWorkspace.shared.open(URL(fileURLWithPath: path))
@@ -1696,11 +1723,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         var formats: [String] = []
         if fullMDCheckbox.state == .on { formats.append("md") }
         if splitMDCheckbox.state == .on { formats.append("split_md") }
-        if htmlCheckbox.state == .on { formats.append("html") }
-        if docxCheckbox.state == .on { formats.append("docx") }
         if searchablePDFCheckbox.state == .on { formats.append("searchable_pdf") }
-        if cleanPDFCheckbox.state == .on { formats.append("clean_pdf") }
-        if zipCheckbox.state == .on { formats.append("zip") }
         return formats
     }
     private func formatTitle(_ format: String) -> String {
@@ -1719,7 +1742,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         profilePopup.isEnabled = !locked
         enhanceCheckbox.isEnabled = !locked
         enhancementModePopup.isEnabled = !locked
-        for checkbox in [fullMDCheckbox, splitMDCheckbox, htmlCheckbox, docxCheckbox, searchablePDFCheckbox, cleanPDFCheckbox, zipCheckbox] {
+        for checkbox in [fullMDCheckbox, splitMDCheckbox, searchablePDFCheckbox] {
             checkbox?.isEnabled = !locked
         }
         stopButton.isEnabled = serverRunning && !locked
@@ -1764,7 +1787,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         case "high": return PerformanceProfile(key: key, title: "Высокая", serverSequences: m <= 16 ? 6 : min(12, m / 2), sdkWorkers: m <= 16 ? 6 : min(12, m / 2), pageQueue: m <= 16 ? 9 : 16, regionQueue: m <= 16 ? 192 : 320, reservedGB: m <= 16 ? 5 : max(7, m / 4))
         case "max": return PerformanceProfile(key: key, title: "Максимальная", serverSequences: m <= 16 ? 7 : min(16, m / 2), sdkWorkers: m <= 16 ? 7 : min(16, m / 2), pageQueue: m <= 16 ? 11 : 20, regionQueue: m <= 16 ? 224 : 384, reservedGB: m <= 16 ? 4 : max(6, m / 5))
         case "extreme": return PerformanceProfile(key: key, title: "Экстрим", serverSequences: m <= 8 ? 3 : (m <= 16 ? 9 : min(24, max(12, m * 3 / 4))), sdkWorkers: m <= 8 ? 3 : (m <= 16 ? 9 : min(24, max(12, m * 3 / 4))), pageQueue: m <= 8 ? 6 : (m <= 16 ? 14 : min(32, m)), regionQueue: m <= 8 ? 96 : (m <= 16 ? 320 : min(640, m * 16)), reservedGB: m <= 16 ? 2 : max(3, m / 12))
-        case "auto": return PerformanceProfile(key: key, title: "Авто", serverSequences: m <= 16 ? 4 : min(9, m / 3), sdkWorkers: m <= 16 ? 4 : min(9, m / 3), pageQueue: m <= 16 ? 6 : 12, regionQueue: m <= 16 ? 112 : 240, reservedGB: m <= 16 ? 7 : max(8, m / 3))
+        case "auto": return PerformanceProfile(key: key, title: "Авто", serverSequences: m <= 16 ? 4 : min(9, m / 3), sdkWorkers: m <= 16 ? 2 : min(9, m / 3), pageQueue: m <= 16 ? 2 : 12, regionQueue: m <= 16 ? 32 : 240, reservedGB: m <= 16 ? 3 : max(8, m / 3))
         default: return PerformanceProfile(key: "balanced", title: "Средняя", serverSequences: m <= 16 ? 5 : min(10, m / 3), sdkWorkers: m <= 16 ? 5 : min(10, m / 3), pageQueue: m <= 16 ? 7 : 14, regionQueue: m <= 16 ? 144 : 288, reservedGB: m <= 16 ? 6 : max(8, m / 4))
         }
     }

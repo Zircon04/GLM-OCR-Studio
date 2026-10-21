@@ -41,29 +41,27 @@ fi
 
 echo "Используется Python: $PY_BIN ($("$PY_BIN" --version))"
 
-# Create virtual environments if missing
 echo "==> Проверка окружений Python..."
 
-if [[ ! -d ".venv-mlx" ]]; then
-  echo "Создание .venv-mlx..."
-  "$PY_BIN" -m venv .venv-mlx
-  ./.venv-mlx/bin/pip install --upgrade pip setuptools wheel
-  ./.venv-mlx/bin/pip install -r requirements/mlx.txt
-fi
+ensure_env() {
+  local name="$1"
+  local requirements="$2"
+  local py=".$name/bin/python"
+  if [[ ! -x "$py" ]]; then
+    echo "Создание .$name..."
+    "$PY_BIN" -m venv ".$name"
+  fi
+  if ! "$py" -m pip --version >/dev/null 2>&1; then
+    echo "В .$name нет pip, восстанавливаю через ensurepip..."
+    "$py" -m ensurepip --upgrade
+  fi
+  "$py" -m pip install --upgrade pip setuptools wheel
+  "$py" -m pip install -r "$requirements"
+}
 
-if [[ ! -d ".venv-enhance" ]]; then
-  echo "Создание .venv-enhance..."
-  "$PY_BIN" -m venv .venv-enhance
-  ./.venv-enhance/bin/pip install --upgrade pip setuptools wheel
-  ./.venv-enhance/bin/pip install -r requirements/enhance.txt
-fi
-
-if [[ ! -d ".venv-sdk" ]]; then
-  echo "Создание .venv-sdk..."
-  "$PY_BIN" -m venv .venv-sdk
-  ./.venv-sdk/bin/pip install --upgrade pip setuptools wheel
-  ./.venv-sdk/bin/pip install -r requirements/sdk.txt
-fi
+ensure_env "venv-mlx" "requirements/mlx.txt"
+ensure_env "venv-enhance" "requirements/enhance.txt"
+ensure_env "venv-sdk" "requirements/sdk.txt"
 
 # Compile Swift GUI App
 echo "==> Сборка приложения macOS (GLM OCR Local.app)..."

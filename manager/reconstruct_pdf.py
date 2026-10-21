@@ -182,6 +182,7 @@ def build(source: Path, json_path: Path, result: Path, output: Path) -> None:
     archive = pymupdf.Archive(str(FONT_DIR))
     image_mapping = enhanced_map(result)
     sizes = page_sizes(source, len(pages))
+    source_doc = pymupdf.open(source) if source.suffix.lower() == ".pdf" and source.exists() else None
 
     for page_index, blocks in enumerate(pages):
         width, height = sizes[page_index]
@@ -205,10 +206,23 @@ def build(source: Path, json_path: Path, result: Path, output: Path) -> None:
                 continue
             if label in {"formula", "display_formula", "inline_formula", "equation", "isolate_formula"}:
                 rendered = formula_png(content)
+                placed = False
                 if rendered:
-                    try: page.insert_image(rect, stream=rendered, keep_proportion=True, overlay=True)
-                    except Exception: rendered = None
-                if not rendered:
+                    try:
+                        page.insert_image(rect, stream=rendered, keep_proportion=True, overlay=True)
+                        placed = True
+                    except Exception:
+                        placed = False
+                if not placed and source_doc is not None and page_index < source_doc.page_count:
+                    clip = block_rect(source_doc[page_index], bbox)
+                    if clip.width > 2 and clip.height > 2:
+                        try:
+                            crop = source_doc[page_index].get_pixmap(clip=clip, dpi=144, alpha=False).tobytes("png")
+                            page.insert_image(rect, stream=crop, keep_proportion=True, overlay=True)
+                            placed = True
+                        except Exception:
+                            placed = False
+                if not placed:
                     fallback = html.escape(re.sub(r"\$+", "", content)).replace("\n", "<br>")
                     page.insert_htmlbox(rect, f"<div style='font-family:OCRMath;font-size:10pt;text-align:center'>{fallback}</div>",
                                         css=BASE_CSS, archive=archive, scale_low=0.35, overlay=True)
@@ -235,8 +249,14 @@ def build(source: Path, json_path: Path, result: Path, output: Path) -> None:
                                 css=BASE_CSS, archive=archive, scale_low=0.30, overlay=True)
         emit(page_index + 1, len(pages))
 
+    if source_doc is not None:
+        source_doc.close()
     document.set_metadata({"title": result.name, "author": "GLM OCR Local",
                            "subject": "Цифровая реконструкция OCR с локальной обработкой MLX/Metal"})
+    try:
+        document.subset_fonts()
+    except Exception:
+        pass
     document.save(output, garbage=4, deflate=True, clean=True)
     document.close()
 

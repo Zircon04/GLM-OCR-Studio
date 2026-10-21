@@ -6,4 +6,6 @@ Pillow
 requests
 rich
 python-dotenv
--e ./GLM-OCR
+Markdown
+matplotlib
+-e ./GLM-OCR[layout]

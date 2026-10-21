@@ -966,7 +966,7 @@ def make_searchable_pdf(
     json_path: Path,
     output: Path,
     downsample_dpi: int | None = None,
-    jpeg_quality: int | None = 80,
+    jpeg_quality: int | None = 0,
     force_grayscale: bool = False,
     overlay_crops: bool = False,
     result_dir: Path | None = None,
@@ -976,8 +976,8 @@ def make_searchable_pdf(
 
     Параметры сжатия относятся только к картинкам страниц:
     ``downsample_dpi=None`` не меняет число пикселей, ``jpeg_quality<=0``
-    отключает пережатие в JPEG, ``force_grayscale`` переводит картинки в серый.
-    Существующий вызов ``make_searchable_pdf(source, json_path, output)`` сохранён.
+    (значение по умолчанию) отключает пережатие в JPEG, ``force_grayscale``
+    переводит картинки в серый.
     """
     source = Path(source)
     json_path = Path(json_path)
@@ -1069,6 +1069,10 @@ def make_searchable_pdf(
                 doc.set_toc(ocr_outline)
             except Exception as exc:
                 _warn(f"оглавление OCR не записано: {exc}")
+        try:
+            doc.subset_fonts()
+        except Exception as exc:
+            _warn(f"подмножество шрифта не собрано: {exc}")
         # garbage/deflate/clean сжимают структуру и потоки, но не перерисовывают текст.
         doc.save(part, garbage=3, deflate=True, clean=True)
     except Exception:
