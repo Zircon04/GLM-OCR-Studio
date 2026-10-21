@@ -1,6 +1,8 @@
 # GLM-OCR Studio (macOS Metal / MLX)
 
-> **Полностью автономная (offline) рабочая станция оптического распознавания текста (OCR) и анализа документов для Mac на базе Apple Silicon (M1/M2/M3/M4).**
+> **Полностью автономная (offline) рабочая станция оптического распознавания текста (OCR) и анализа документов для Mac на базе Apple Silicon (M1/M2/M3/M4).** Текущая версия исходников: **1.2.0**.
+
+В 1.2.0: поисковый PDF с текстом по координатам блоков, выбор папки результата, склейка переносов в Markdown, очистка временных файлов и интерфейс Liquid Glass (на macOS 26 — системное стекло). Для GTX 1060 и других карт без RTX добавлен запуск через Ollama. Скрипты Windows в релиз входят, но на Windows не проверялись. Готовый zip для Mac по-прежнему собирается на самом Mac: `./scripts/package_release.sh 1.2.0`.
 
 [English Description Below](#english-overview)
 
@@ -97,6 +99,35 @@ open "GLM OCR Local.app"
 ```
 
 При первом старте интерфейс загрузит модель `mlx-community/GLM-OCR-bf16` из Hugging Face в локальный кэш (около 4.5 ГБ, загружается один раз).
+
+---
+
+## NVIDIA (Linux) и Windows
+
+Приложение Swift остаётся только для Mac на Apple Silicon. На NVIDIA тот же пайплайн ходит в Ollama, а не в MLX.
+
+RTX для этого не нужен. vLLM и SGLang требуют compute capability 7.5+ (GeForce RTX 20 и новее) и на GTX 1060 не запускаются. GTX 1060 6 ГБ идёт через Ollama, квант `glm-ocr:q8_0`. На картах от 8 ГБ скрипт берёт F16. Детектор вёрстки сидит на CPU, на видеокарте один запрос за раз. Апскейл RealESRGAN в этом режиме выключен: он собран под MLX.
+
+Linux, включая карту без RTX:
+
+```bash
+./setup-nvidia.sh
+./start-glm-ocr-nvidia.sh
+./run-ocr-nvidia.sh /путь/к/скану.pdf
+```
+
+Windows, те же карты, и 1060, и RTX:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\windows\setup-sdk.ps1
+.\windows\start-glm-ocr.ps1
+.\windows\run-ocr.ps1 C:\путь\к\скану.pdf
+```
+
+Нужны драйвер NVIDIA, [Ollama для Windows](https://ollama.com/download) и Python 3.10–3.12. vLLM этот сценарий не ставит даже на RTX: в обычный Windows он не ставится, только в WSL.
+
+**Сборка для Windows не проверялась.** Скрипты в `windows/` написаны по схеме Linux-версии и на реальной Windows-машине не запускались.
 
 ---
 

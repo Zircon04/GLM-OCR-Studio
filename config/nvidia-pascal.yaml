@@ -1,0 +1,281 @@
+# GLM-OCR на NVIDIA без RTX, в том числе GTX 1060 6 ГБ (Pascal, compute 6.1).
+#
+# vLLM и SGLang сюда не подходят: официальные сборки требуют compute capability
+# >= 7.5 (RTX 20 и новее). Распознавание идёт через Ollama / llama.cpp,
+# раскладка страницы — на CPU, чтобы не делить 6 ГБ с видеокартой рабочего стола.
+#
+# Модель glm-ocr-pascal создаёт scripts/start-glm-ocr-nvidia.sh
+# (на 6 ГБ это q8_0, на картах от 8 ГБ — F16).
+
+# Server settings (for glmocr.server)
+server:
+  host: "127.0.0.1"
+  port: 5002
+  debug: false
+
+# Logging settings
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR
+  # DEBUG enables profiling output with timing information
+  level: INFO
+  # format: "[%(levelname)s] %(name)s: %(message)s"  # custom format (optional)
+
+# Pipeline settings
+pipeline:
+  # ============================================================================
+  # MaaS Mode (Zhipu Cloud API)
+  # ============================================================================
+  # When enabled, the SDK forwards requests directly to Zhipu's cloud API
+  # without local processing. The cloud service handles layout detection,
+  # OCR, and result formatting internally.
+  #
+  # Use this mode when:
+  # - You don't have a GPU or don't want to self-host
+  # - You want the simplest setup (just need an API key)
+  # - You want to use the exact same service as Zhipu's cloud offering
+  #
+  # Note: When maas.enabled=true, the ocr_api and layout settings below are ignored.
+  maas:
+    enabled: false # Локальный Ollama, без облака
+    api_url: http://127.0.0.1:11434/disabled-maas
+    model: glm-ocr-pascal
+    api_key: null # Required! Get from https://open.bigmodel.cn
+    verify_ssl: true
+    connect_timeout: 30
+    request_timeout: 300
+    retry_max_attempts: 2
+    retry_backoff_base_seconds: 0.5
+    retry_backoff_max_seconds: 8.0
+    retry_jitter_ratio: 0.2
+    retry_status_codes: [429, 500, 502, 503, 504]
+    connection_pool_size: 16
+
+  # ============================================================================
+  # Self-hosted Mode (vLLM / SGLang)
+  # ============================================================================
+  # When maas.enabled=false, the SDK uses the settings below to connect to
+  # a self-hosted vLLM or SGLang service running the GLM-OCR model.
+  #
+  # Use this mode when:
+  # - You have GPU resources and want full control
+  # - You need offline/air-gapped operation
+  # - You want to customize the pipeline (layout detection, prompts, etc.)
+
+  # Один запрос за раз: на 6 ГБ параллельные картинки сразу дают OOM.
+  ocr_api:
+    api_host: 127.0.0.1
+    api_port: 11434
+    # Алиас, который создаёт start-glm-ocr-nvidia.sh из glm-ocr:q8_0 или :latest.
+    model: glm-ocr-pascal
+    api_scheme: http
+    api_path: /api/generate
+    api_url: null
+    # Родной API Ollama. OpenAI-совместимый /v1 на vision-запросах часто отвечает 502.
+    api_mode: ollama_generate
+    api_key: null
+    headers: {}
+    verify_ssl: false
+    connect_timeout: 30
+    request_timeout: 900
+    retry_max_attempts: 2
+    retry_backoff_base_seconds: 1.0
+    retry_backoff_max_seconds: 8.0
+    retry_jitter_ratio: 0.2
+    retry_status_codes: [429, 500, 502, 503, 504]
+    connection_pool_size: 2
+
+  max_workers: 1
+  page_maxsize: 2
+  region_maxsize: 8
+
+  # Page loader: handles image/PDF loading and API request building
+  page_loader:
+    # Generation parameters
+    max_tokens: 4096
+    temperature: 0.0
+    top_p: 0.00001
+    top_k: 1
+    repetition_penalty: 1.1
+
+    # Картинка региона режется заранее: полный скан 200 DPI на Pascal не влезает
+    # вместе с рабочим столом в 6 ГБ.
+    t_patch_size: 2
+    patch_expand_factor: 1
+    image_expect_length: 2048
+    image_format: JPEG
+    min_pixels: 12544
+    max_pixels: 2359296 # 1536 * 1536
+
+    # Task-specific prompts
+    task_prompt_mapping:
+      text: "Text Recognition:"
+      table: "Table Recognition:"
+      formula: "Formula Recognition:"
+
+    # PDF processing
+    pdf_dpi: 120
+    pdf_max_pages: null # null = no limit
+    pdf_verbose: false
+
+  # Result formatter: post-processing and output formatting
+  result_formatter:
+    # Output format: json, markdown, or both
+    output_format: both
+    # Post-process switches
+    enable_merge_formula_numbers: true
+    enable_merge_text_blocks: true
+    enable_format_bullet_points: true
+
+    # Label to visualization category mapping (for layout visualization)
+    label_visualization_mapping:
+      table:
+        - table
+      formula:
+        - display_formula
+        - inline_formula
+      image:
+        - chart
+        - image
+      text:
+        - abstract
+        - algorithm
+        - content
+        - doc_title
+        - figure_title
+        - paragraph_title
+        - reference_content
+        - text
+        - vertical_text
+        - vision_footnote
+        - seal
+        - formula_number
+
+  # Layout detection settings
+  layout:
+    # PP-DocLayoutV3 model directory
+    # Can be a local folder or a Hugging Face model id
+    # (Use *_safetensors for Transformers; PaddlePaddle/PP-DocLayoutV3 is a PaddleOCR export)
+    model_dir: PaddlePaddle/PP-DocLayoutV3_safetensors
+
+    # Detection threshold
+    threshold: 0.3
+    # threshold_by_class:           # per-class threshold override
+    #   0: 0.5
+    #   1: 0.3
+    #   text: 0.5
+    #   table: 0.2
+
+    # Processing
+    # batch_size: max images per model forward pass (reduce to 1 if OOM)
+    batch_size: 1
+    workers: 1
+    cuda_visible_devices: ""
+    # Видеокарта занята Ollama. Детектор вёрстки маленький и нормально живёт на CPU.
+    device: cpu
+
+    # Use polygon masks for region cropping and visualization.
+    # When true, regions are cropped using the polygon outline from layout
+    # detection (more precise, masks out content outside the polygon),
+    # recommended for documents with rotating or staggered layouts.
+    # When false, regions are cropped using the bounding box only (faster, simpler),
+    # recommended for regular documents without rotating.
+    use_polygon: false
+
+    # Post-processing
+    layout_nms: true
+    layout_unclip_ratio:
+      - 1.0
+      - 1.0
+
+    # Merge mode for overlapping bboxes: "large" or "small"
+    # Can be a single value or per-class dict
+    layout_merge_bboxes_mode:
+      0: large # abstract
+      1: large # algorithm
+      2: large # aside_text
+      3: large # chart
+      4: large # content
+      5: large # display_formula
+      6: large # doc_title
+      7: large # figure_title
+      8: large # footer
+      9: large # footer
+      10: large # footnote
+      11: large # formula_number
+      12: large # header
+      13: large # header
+      14: large # image
+      15: large # inline_formula
+      16: large # number
+      17: large # paragraph_title
+      18: small # reference
+      19: large # reference_content
+      20: large # seal
+      21: large # table
+      22: large # text
+      23: large # vertical_text
+      24: large # vision_footnote
+
+    # Map detected labels to OCR task types
+    # - text/table/formula: OCR with corresponding prompt
+    # - skip: keep region but don't OCR (e.g., images)
+    # - abandon: discard region entirely
+    label_task_mapping:
+      text:
+        - abstract
+        - algorithm
+        - content
+        - doc_title
+        - figure_title
+        - paragraph_title
+        - reference_content
+        - text
+        - vertical_text
+        - vision_footnote
+        - seal
+        - formula_number
+      table:
+        - table
+      formula:
+        - display_formula
+        - inline_formula
+      skip:
+        - chart
+        - image
+      abandon:
+        - header
+        - footer
+        - number
+        - footnote
+        - aside_text
+        - reference
+        - footer_image
+        - header_image
+
+    # Map label index to label name
+    id2label:
+      0: abstract
+      1: algorithm
+      2: aside_text
+      3: chart
+      4: content
+      5: display_formula
+      6: doc_title
+      7: figure_title
+      8: footer
+      9: footer_image
+      10: footnote
+      11: formula_number
+      12: header
+      13: header_image
+      14: image
+      15: inline_formula
+      16: number
+      17: paragraph_title
+      18: reference
+      19: reference_content
+      20: seal
+      21: table
+      22: text
+      23: vertical_text
+      24: vision_footnote

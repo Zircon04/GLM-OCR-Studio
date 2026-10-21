@@ -13,7 +13,7 @@ import zipfile
 from pathlib import Path
 from urllib.parse import quote
 
-import pymupdf
+from searchable_pdf import make_searchable_pdf
 
 EVENT_PREFIX = "GLMOCR_EVENT "
 RECONSTRUCT_SCRIPT = Path(__file__).with_name("reconstruct_pdf.py")
@@ -135,29 +135,6 @@ def add_markdown_to_docx(markdown: str, output: Path, title: str, asset_root: Pa
     doc.save(output)
 
 
-def make_searchable_pdf(source: Path, json_path: Path, output: Path) -> None:
-    if source.suffix.lower() != ".pdf":
-        return
-    pages = json.loads(json_path.read_text(encoding="utf-8"))
-    doc = pymupdf.open(source)
-    for page_index, blocks in enumerate(pages[: len(doc)]):
-        if not isinstance(blocks, list):
-            continue
-        page = doc[page_index]
-        rect = page.rect
-        page_text: list[str] = []
-        for block in blocks:
-            content = str(block.get("content", "")).strip()
-            if content:
-                page_text.append(re.sub(r"\s+", " ", re.sub(r"<[^>]+>|\$+|\\[A-Za-z]+|[{}]", " ", content)).strip())
-        clean = "\n".join(text for text in page_text if text)
-        if clean:
-            hidden = "<div style='font-size:5px'>" + html.escape(clean).replace("\n", "<br>") + "</div>"
-            page.insert_htmlbox(rect, hidden, opacity=0, overlay=True, scale_low=0.05)
-    doc.save(output, garbage=3, deflate=True)
-    doc.close()
-
-
 def make_split_md(markdown: str, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     lines = markdown.splitlines(keepends=True)
@@ -201,6 +178,10 @@ def main() -> int:
     parser.add_argument("--source", required=True)
     parser.add_argument("--output-root", required=True)
     parser.add_argument("--formats", default="md,split_md,html,docx,searchable_pdf,clean_pdf,zip")
+    parser.add_argument("--downsample-dpi", type=int, default=None, help="DPI картинок страницы. Пусто — не менять размер.")
+    parser.add_argument("--jpeg-quality", type=int, default=None, help="JPEG 1–95. 0 — не пережимать. По умолчанию 80.")
+    parser.add_argument("--force-grayscale", action="store_true", help="Перевести картинки страниц в оттенки серого.")
+    parser.add_argument("--overlay-crops", action="store_true", help="Наложить вырезанные моделью фигуры поверх скана.")
     args = parser.parse_args()
     result = Path(args.result)
     source = Path(args.source)
@@ -239,8 +220,35 @@ def main() -> int:
             add_markdown_to_docx(markdown, path, base, markdown_path.parent)
         elif format_name == "searchable_pdf":
             path = exports / f"{base}_searchable.pdf"
-            make_searchable_pdf(source, json_path, path)
-            if not path.exists(): path = None
+            format_done = done
+            format_total = total
+
+            def on_page(pages_done: int, pages_total: int, _done: int = format_done, _total: int = format_total) -> None:
+                emit(
+                    "searchable_pdf_progress",
+                    pages_done=pages_done,
+                    pages_total=pages_total,
+                    format_done=_done,
+                    format_total=_total,
+                )
+
+            try:
+                kwargs = {
+                    "force_grayscale": args.force_grayscale,
+                    "overlay_crops": args.overlay_crops,
+                    "result_dir": result,
+                    "progress": on_page,
+                }
+                if args.downsample_dpi is not None:
+                    kwargs["downsample_dpi"] = args.downsample_dpi
+                if args.jpeg_quality is not None:
+                    kwargs["jpeg_quality"] = args.jpeg_quality
+                make_searchable_pdf(source, json_path, path, **kwargs)
+            except Exception as exc:
+                emit("export_error", format=format_name, message=f"Searchable PDF: {exc}")
+                return 3
+            if not path.exists():
+                path = None
         elif format_name == "clean_pdf":
             path = exports / f"{base}_clean.pdf"
             process = subprocess.Popen([
