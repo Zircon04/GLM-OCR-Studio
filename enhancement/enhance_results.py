@@ -11,10 +11,8 @@ import sys
 from pathlib import Path
 
 import cv2
-import mlx.core as mx
 import numpy as np
 from PIL import Image
-from realesrgan_mlx.pipeline_mlx import make_upsampler
 
 SUPPORTED = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 
@@ -73,8 +71,15 @@ def main() -> int:
 
     upsampler = None
     if args.mode == "hybrid":
-        os.environ.setdefault("HF_HUB_OFFLINE", "1")
-        upsampler = make_upsampler("RealESRGAN_x2plus", tile=args.tile)
+        # Enhancement never downloads models; missing optional weights fall back.
+        # Set this before importing the optional loader (HF reads it at import).
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        try:
+            from realesrgan_mlx.pipeline_mlx import make_upsampler
+
+            upsampler = make_upsampler("RealESRGAN_x2plus", tile=args.tile)
+        except Exception as exc:
+            print(f"ENHANCE_WARNING Real-ESRGAN unavailable; using classical restoration: {exc}", flush=True)
 
     enhanced_count = 0
     upscaled_count = 0
@@ -99,13 +104,15 @@ def main() -> int:
                 and width * height <= args.max_pixels
             )
             if should_upscale:
-                temp = dst_dir / (dst.stem + ".pre_esrgan.png")
-                Image.fromarray(restored).save(temp)
-                output, _ = upsampler.enhance(np.asarray(Image.open(temp)), outscale=2)
-                temp.unlink(missing_ok=True)
-                restored = output
-                method += " + Real-ESRGAN x2 (MLX)"
-                upscaled_count += 1
+                try:
+                    output, _ = upsampler.enhance(restored, outscale=2)
+                    restored = output
+                    method += " + Real-ESRGAN x2 (MLX)"
+                    upscaled_count += 1
+                except Exception as exc:
+                    print(f"ENHANCE_WARNING {src}: Real-ESRGAN failed; keeping classical restoration: {exc}", flush=True)
+                    # Avoid repeated Metal/model errors for the remaining images.
+                    upsampler = None
             Image.fromarray(restored).save(dst, optimize=True)
             enhanced_count += 1
             replacements[f"imgs/{relative.as_posix()}"] = f"imgs_enhanced/{relative.with_suffix('.png').as_posix()}"
@@ -132,7 +139,6 @@ def main() -> int:
     manifest_path = result_dir / "image-enhancement-manifest.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"ENHANCE_DONE {enhanced_count} {upscaled_count}", flush=True)
-    print(f"Metal device: {mx.default_device()}", flush=True)
     return 0
 
 

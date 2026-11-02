@@ -12,11 +12,13 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 import zipfile
 import unicodedata
 import codecs
 import hashlib
 import psutil
+import pymupdf
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -105,15 +107,29 @@ def memory_free_percent() -> int | None:
 def wait_for_memory() -> None:
     profile = read_profile()
     reserve = int(profile.get("reserved", 5))
-    total = max(1, int(profile.get("memory", 16)))
-    minimum_free = max(10, int(reserve / total * 100))
     while not cancelled:
-        free = memory_free_percent()
-        if free is None or free >= minimum_free:
-            return
+        try:
+            memory = psutil.virtual_memory()
+            # Gate on bytes, not rounded percentages or a profile's possibly
+            # stale TOTAL_MEMORY_GB. Never auto-clamp explicit reserves downward.
+            minimum_bytes = max(reserve * 1024 ** 3, (memory.total + 9) // 10)
+            free = int(memory.available * 100 // memory.total)
+            minimum_free = max(10, (reserve * 1024 ** 3 * 100 + memory.total - 1) // memory.total)
+            if memory.available >= minimum_bytes:
+                return
+            message = f"Память занята; нужно ≥{reserve} ГБ (и ≥10% ОЗУ) перед следующим блоком. Закройте другие приложения или приостановите задание."
+        except Exception:
+            # Unknown telemetry must not silently bypass the admission guard.
+            free = minimum_free = None
+            message = "Не удалось проверить свободную память; жду повторной проверки. Задание можно приостановить."
         emit("memory_wait", free_percent=free, minimum_percent=minimum_free,
-             message="Память занята; следующий блок подождёт, чтобы macOS оставалась отзывчивой")
-        time.sleep(5)
+             reserved_gb=reserve, message=message)
+        # Python restarts a signal-interrupted sleep; poll cancellation as well
+        # as memory so Pause does not wait for the full five-second interval.
+        for _ in range(50):
+            if cancelled:
+                return
+            time.sleep(0.1)
 
 
 def local_server_alive() -> bool:
@@ -495,12 +511,17 @@ def normalize_book_markdown(final_dir: Path, base: str) -> None:
 
 
 def finalize_book_dir(final_dir: Path, base: str) -> None:
-    """В папке книги остаются только Markdown и каталог извлечённых изображений."""
+    """Оставляет основной Markdown, оригинальные и улучшенные изображения."""
     if not final_dir.is_dir():
         return
     keep_md = f"{base}.md"
+    enhanced_md = final_dir / f"{base}_enhanced.md"
+    if enhanced_md.is_file() and not enhanced_md.is_symlink():
+        # Exports already reference imgs_enhanced. Keep those images and make
+        # the main Markdown use the enhanced result instead of discarding it.
+        enhanced_md.replace(final_dir / keep_md)
     for child in list(final_dir.iterdir()):
-        if child.name == keep_md or (child.name == "imgs" and child.is_dir() and not child.is_symlink()):
+        if child.name == keep_md or (child.name in {"imgs", "imgs_enhanced"} and child.is_dir() and not child.is_symlink()):
             continue
         if child.is_symlink() or child.is_file():
             child.unlink(missing_ok=True)
@@ -571,6 +592,7 @@ def run_job(args: argparse.Namespace) -> int:
             return 0
         emit("resumed", message="Продолжаю ранее начатое задание", state_path=str(state_path))
         # A resumed job follows the options currently selected in the GUI.
+        state["profile"] = profile
         state["enhancement"] = args.enhance
         state["exports"] = args.exports
         state["export_formats"] = export_formats
@@ -602,23 +624,65 @@ def run_job(args: argparse.Namespace) -> int:
     previous_processing = float(state.get("processing_seconds", 0.0))
     work_root = output_root / ".job/results"
     work_root.mkdir(parents=True, exist_ok=True)
-    for chunk_index, chunk in enumerate(state["chunks"]):
+    # Optional page grouping (GLMOCR_GROUP_PAGES=N, set by the overnight queue): up to N pending
+    # one-page chunks are OCR'd by ONE glmocr process (directory input), so the layout model and
+    # pipeline start once per group instead of once per page. Every chunk keeps its own output
+    # folder, so merging, page markers, image names and resume are exactly as with single chunks.
+    # Unset or 1 = original behaviour (one glmocr process per chunk).
+    try:
+        group_pages = max(1, min(64, int(os.environ.get("GLMOCR_GROUP_PAGES", "1"))))
+    except ValueError:
+        group_pages = 1
+    pending_indices = [i for i, c in enumerate(state["chunks"]) if c["status"] != "done"]
+    work: list[list[int]] = []
+    for i in pending_indices:
+        single_page = state["chunks"][i]["end"] - state["chunks"][i]["start"] == 1
+        if (group_pages > 1 and single_page and work and len(work[-1]) < group_pages
+                and all(state["chunks"][j]["end"] - state["chunks"][j]["start"] == 1 for j in work[-1])):
+            work[-1].append(i)
+        else:
+            work.append([i])
+    while work:
+        group = work.pop(0)
         if cancelled:
             break
-        if chunk["status"] == "done":
-            continue
         wait_for_memory()
-        chunk_output = work_root / chunk["id"]
-        chunk_output.mkdir(parents=True, exist_ok=True)
-        chunk["status"] = "running"
-        chunk["output"] = str(chunk_output)
+        if cancelled:
+            break
+        members = [state["chunks"][i] for i in group]
+        chunk_index, chunk = group[0], members[0]
+        if len(members) == 1:
+            chunk_output = work_root / chunk["id"]
+            chunk_output.mkdir(parents=True, exist_ok=True)
+            chunk["status"] = "running"
+            chunk["output"] = str(chunk_output)
+            parse_input, parse_output = chunk["input"], chunk_output
+        else:
+            group_in = output_root / ".job" / "groups" / chunk["id"]
+            group_out = work_root / ("group_" + chunk["id"])
+            for folder in (group_in, group_out):
+                if folder.exists() and _is_within(folder, output_root / ".job"):
+                    shutil.rmtree(folder, ignore_errors=True)
+                folder.mkdir(parents=True, exist_ok=True)
+            for member in members:
+                member["status"] = "running"
+                member["output"] = str(group_out / member["id"])
+            parse_input, parse_output = str(group_in), group_out
         state["current_chunk"] = chunk_index
         state["updated_at"] = time.time()
         atomic_json(state_path, state)
-        ensure_chunk_input(state, chunk)
-        emit("chunk_started", index=chunk_index + 1, count=len(state["chunks"]), page_start=chunk["start"] + 1, page_end=chunk["end"], **progress_payload(state))
+        for member in members:
+            ensure_chunk_input(state, member)
+        if len(members) > 1:
+            for member in members:
+                link = Path(parse_input) / f"{member['id']}.pdf"
+                try:
+                    os.link(member["input"], link)
+                except OSError:
+                    shutil.copy2(member["input"], link)
+        emit("chunk_started", index=chunk_index + 1, count=len(state["chunks"]), page_start=chunk["start"] + 1, page_end=members[-1]["end"], **progress_payload(state))
         command = [
-            str(GLMOCR), "parse", chunk["input"], "--config", str(CONFIG), "--output", str(chunk_output),
+            str(GLMOCR), "parse", str(parse_input), "--config", str(CONFIG), "--output", str(parse_output),
             "--set", "pipeline.max_workers", str(profile["workers"]),
             "--set", "pipeline.page_maxsize", str(profile["pages"]),
             "--set", "pipeline.region_maxsize", str(profile["regions"]),
@@ -631,18 +695,33 @@ def run_job(args: argparse.Namespace) -> int:
         if code != 0:
             server_lost = not cancelled and not local_server_alive()
             resumable = cancelled or server_lost
-            chunk["status"] = "paused" if resumable else "error"
+            for member in members:
+                member["status"] = "paused" if resumable else "error"
             state["status"] = "paused" if resumable else "error"
             state["error"] = "Локальный сервер недоступен — задание можно продолжить" if server_lost else f"OCR завершился с кодом {code}"
             atomic_json(state_path, state)
             emit("server_lost" if server_lost else ("job_paused" if cancelled else "error"), message=state["error"], **progress_payload(state))
             return 75 if server_lost else (130 if cancelled else code)
-        chunk["status"] = "done"
-        chunk["completed_at"] = time.time()
+        if len(members) > 1:
+            # A page whose folder glmocr did not write is never merged as empty: retry it alone.
+            missing = [i for i, member in zip(group, members) if not Path(member["output"]).is_dir()]
+            for i in missing:
+                state["chunks"][i]["status"] = "pending"
+                emit("log", level="warning", message=f"Страница {state['chunks'][i]['start'] + 1}: нет результата группы, повторяю отдельно")
+            work[:0] = [[i] for i in missing]
+            members = [member for member in members if member["status"] == "running"]
+        for member in members:
+            member["status"] = "done"
+            member["completed_at"] = time.time()
         final_dir = merge_chunks(state, output_root)
         state["final_dir"] = str(final_dir)
         commit_merged_chunks(state, output_root, state_path, final_dir)
-        emit("chunk_completed", index=chunk_index + 1, count=len(state["chunks"]), **progress_payload(state))
+        if len(group) > 1:
+            shutil.rmtree(output_root / ".job" / "groups" / chunk["id"], ignore_errors=True)
+            shutil.rmtree(work_root / ("group_" + chunk["id"]), ignore_errors=True)
+        for i, member in zip(group, [state["chunks"][i] for i in group]):
+            if member["status"] == "done":
+                emit("chunk_completed", index=i + 1, count=len(state["chunks"]), **progress_payload(state))
 
     if cancelled:
         state["status"] = "paused"
@@ -689,7 +768,32 @@ def run_job(args: argparse.Namespace) -> int:
             emit("job_paused", message="Экспорт приостановлен", **progress_payload(state))
             return 130
         if code != 0:
-            emit("log", level="warning", message="Основной результат готов, но часть экспортов не создана")
+            # Do not finalize/delete JSON after failed exports: it is required
+            # for retrying PDF construction without recognizing the book again.
+            state["status"] = "error"
+            state["error"] = f"Экспорт завершился с кодом {code}. OCR сохранён; задание можно продолжить."
+            state["updated_at"] = time.time()
+            atomic_json(state_path, state)
+            emit("error", message=state["error"], **progress_payload(state))
+            return code
+
+    optimize_cmd = [
+        sys.executable, str(INSTALL_DIR / "manager/optimize_images.py"),
+        "--result", str(final_dir), "--output-root", str(output_root),
+    ]
+    emit("log", level="info", message="Оптимизация изображений без потерь перед очисткой")
+    code = run_streaming(optimize_cmd, "optimize", state, state_path)
+    if cancelled:
+        state["status"] = "paused"
+        atomic_json(state_path, state)
+        emit("paused", message="Задание приостановлено во время оптимизации", **progress_payload(state))
+        return 130
+    if code != 0:
+        state["status"] = "error"
+        state["error"] = "Оптимизация не завершена. Файлы сохранены; задание можно продолжить."
+        atomic_json(state_path, state)
+        emit("error", message=state["error"], **progress_payload(state))
+        return code
 
     final_dir = Path(state.get("final_dir") or (output_root / state["result_name"]))
     remove_job_dir(output_root)
@@ -713,7 +817,7 @@ def main() -> int:
     parser.add_argument("--output", required=True)
     parser.add_argument("--enhance", choices=("off", "safe", "hybrid"), default="hybrid")
     parser.add_argument("--exports", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--export-formats", default="html,docx,searchable_pdf,clean_pdf,zip")
+    parser.add_argument("--export-formats", default="md,split_md,searchable_pdf")
     parser.add_argument("--pdf-downsample-dpi", type=int, default=None, help="Уменьшить картинки searchable PDF до этого DPI.")
     parser.add_argument("--pdf-jpeg-quality", type=int, default=None, help="Качество JPEG в searchable PDF (0 — не пережимать).")
     parser.add_argument("--pdf-grayscale", action="store_true", help="Серые картинки в searchable PDF.")

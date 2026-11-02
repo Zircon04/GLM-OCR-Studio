@@ -6,12 +6,13 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import os
 import re
 import subprocess
 import sys
 import zipfile
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 from searchable_pdf import make_searchable_pdf
 
@@ -28,13 +29,100 @@ def find_file(root: Path, suffix: str, exclude: str = "") -> Path | None:
     return sorted(files, key=lambda p: len(p.parts))[0] if files else None
 
 
-def markdown_to_html(markdown: str, base: str) -> str:
+def rebase_markdown_assets(markdown: str, asset_root: Path, output_dir: Path, *,
+                           asset_map: dict[Path, Path] | None = None) -> str:
+    """Change image destinations only; never parse/re-serialize OCR text or math.
+
+    Assets remain in their original directory. Export URLs are relative to the
+    actual destination, including nested chapter directories and OCR results.
+    With asset_map, rewrite only mapped absolute/resolved image destinations;
+    all other references remain byte-for-byte unchanged.
+    """
+    def rebase(url: str) -> str:
+        parsed = urlsplit(html.unescape(url))
+        if (not parsed.path or parsed.scheme or parsed.netloc
+                or parsed.path.startswith(("/", "\\\\"))
+                or re.match(r"^[A-Za-z]:", parsed.path)):
+            return url
+        target = asset_root / unquote(parsed.path)
+        if asset_map is not None:
+            target = target.resolve()
+            if target not in asset_map:
+                return url
+            target = asset_map[target]
+        relative = os.path.relpath(target, output_dir).replace(os.sep, "/")
+        # Keep URL delimiters in query/fragment exactly as supplied.
+        suffix = url[len(url.split("#", 1)[0].split("?", 1)[0]):]
+        return quote(relative, safe="/-._~") + suffix
+
+    # Protect literal regions before looking for actual image syntax. Placeholders
+    # are collision-free and restored byte-for-byte, including LaTeX backslashes.
+    protected = re.compile(
+        r"(?m)^ {0,3}(?P<fence>`{3,}|~{3,})[^\n]*\n"
+        r"[\s\S]*?(?:^ {0,3}(?P=fence)[ \t]*(?:\n|$)|\Z)"
+        r"|<!--[^\x00]*?-->"
+        r"|<(?:pre|code|script|style)\b[^>]*>[\s\S]*?</(?:pre|code|script|style)\s*>"
+        r"|(?m:^(?:(?: {4}|\t)[^\n]*(?:\n|$))+)"
+        r"|(?P<ticks>`+)(?!`)[^\n]*?(?P=ticks)(?!`)"
+        r"|\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)"
+        r"|(?<!\\)\$(?!\$)[^\n$]*?(?<!\\)\$",
+        re.IGNORECASE,
+    )
+    token = "\x00GLMOCR_LITERAL_"
+    while token in markdown:
+        token += "_"
+    literals: list[str] = []
+
+    def protect(match: re.Match) -> str:
+        literals.append(match.group())
+        return f"{token}{len(literals) - 1}\x00"
+
+    text = protected.sub(protect, markdown)
+    image = re.compile(
+        r"(?<![!\\])!(?P<label>\[(?:\\.|[^\]\\])*\])\(\s*"
+        r"(?:<(?P<angle>[^>\n]*)>|(?P<bare>(?:\\.|[^()\s]|\([^()\n]*\))+))"
+    )
+
+    def replace_image(match: re.Match) -> str:
+        group = "angle" if match.group("angle") is not None else "bare"
+        start, end = match.span(group)
+        return match.group()[:start - match.start()] + rebase(match.group(group)) + match.group()[end - match.start():]
+
+    # Match whole HTML tags before Markdown images, so image-like text inside
+    # alt/title attributes is never interpreted as Markdown syntax.
+    tag = re.compile(r"<img\b(?:[^>\"']|\"[^\"]*\"|'[^']*')*>", re.IGNORECASE)
+    attribute = re.compile(
+        r"(?P<name>[^\s=/>]+)(?:\s*=\s*(?:\"(?P<double>[^\"]*)\""
+        r"|'(?P<single>[^']*)'|(?P<bare>[^\s>]+)))?"
+    )
+
+    def replace_tag(match: re.Match) -> str:
+        def replace_src(attr: re.Match) -> str:
+            if attr.group("name").lower() != "src":
+                return attr.group()
+            group = next((name for name in ("double", "single", "bare")
+                          if attr.group(name) is not None), None)
+            if group is None:
+                return attr.group()
+            start, end = attr.span(group)
+            return attr.group()[:start - attr.start()] + rebase(attr.group(group)) + attr.group()[end - attr.start():]
+        return attribute.sub(replace_src, match.group())
+
+    syntax = re.compile(f"(?P<html_tag>{tag.pattern})|{image.pattern}", re.IGNORECASE)
+    text = syntax.sub(lambda match: replace_tag(match) if match.group("html_tag") is not None
+                      else replace_image(match), text)
+    for index, literal in enumerate(literals):
+        text = text.replace(f"{token}{index}\x00", literal)
+    return text
+
+
+def markdown_to_html(markdown: str, base: str, *, asset_root: Path | None = None,
+                     output_dir: Path | None = None) -> str:
     try:
         import markdown as md
-        body = md.markdown(markdown, extensions=["tables", "fenced_code", "sane_lists"])
-        prefix = "../" + quote(base) + "/"
-        body = body.replace('src="imgs/', f'src="{prefix}imgs/')
-        body = body.replace('src="imgs_enhanced/', f'src="{prefix}imgs_enhanced/')
+        rebased = rebase_markdown_assets(markdown, asset_root if asset_root is not None else Path(base),
+                                         output_dir if output_dir is not None else Path("exports"))
+        body = md.markdown(rebased, extensions=["tables", "fenced_code", "sane_lists"])
     except Exception:
         body = "<pre>" + html.escape(markdown) + "</pre>"
     return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
@@ -135,7 +223,7 @@ def add_markdown_to_docx(markdown: str, output: Path, title: str, asset_root: Pa
     doc.save(output)
 
 
-def make_split_md(markdown: str, output_dir: Path) -> None:
+def make_split_md(markdown: str, output_dir: Path, *, asset_root: Path | None = None) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     lines = markdown.splitlines(keepends=True)
     heading_prefix = '# '
@@ -156,7 +244,10 @@ def make_split_md(markdown: str, output_dir: Path) -> None:
         filename = f"{part_counter:02d}_{clean_title}.md"
         filepath = output_dir / filename
         
-        filepath.write_text("".join(current_section), encoding='utf-8')
+        content = "".join(current_section)
+        if asset_root is not None:
+            content = rebase_markdown_assets(content, asset_root, filepath.parent)
+        filepath.write_text(content, encoding='utf-8')
         part_counter += 1
 
     for line in lines:
@@ -177,9 +268,9 @@ def main() -> int:
     parser.add_argument("--result", required=True)
     parser.add_argument("--source", required=True)
     parser.add_argument("--output-root", required=True)
-    parser.add_argument("--formats", default="md,split_md,html,docx,searchable_pdf,clean_pdf,zip")
+    parser.add_argument("--formats", default="md,split_md,searchable_pdf")
     parser.add_argument("--downsample-dpi", type=int, default=None, help="DPI картинок страницы. Пусто — не менять размер.")
-    parser.add_argument("--jpeg-quality", type=int, default=None, help="JPEG 1–95. 0 — не пережимать. По умолчанию 80.")
+    parser.add_argument("--jpeg-quality", type=int, default=0, help="JPEG 1–95. 0 — не пережимать (по умолчанию; сохраняет исходные пиксели и цвета).")
     parser.add_argument("--force-grayscale", action="store_true", help="Перевести картинки страниц в оттенки серого.")
     parser.add_argument("--overlay-crops", action="store_true", help="Наложить вырезанные моделью фигуры поверх скана.")
     args = parser.parse_args()
@@ -187,8 +278,13 @@ def main() -> int:
     source = Path(args.source)
     output_root = Path(args.output_root)
     requested = [item.strip() for item in args.formats.split(",") if item.strip()]
-    allowed = {"md", "split_md", "html", "docx", "searchable_pdf", "clean_pdf", "zip"}
-    formats = [item for item in requested if item in allowed]
+    allowed = {"md", "split_md", "searchable_pdf"}
+    unsupported = [item for item in requested if item not in allowed]
+    if unsupported or not requested:
+        emit("export_error", message="Unsupported or empty export formats; supported: md,split_md,searchable_pdf",
+             unsupported=unsupported)
+        return 2
+    formats = list(dict.fromkeys(requested))
     exports = output_root / "exports"
     exports.mkdir(parents=True, exist_ok=True)
     markdown_path = find_file(result, "_enhanced.md") or find_file(result, ".md", "_enhanced")
@@ -208,13 +304,14 @@ def main() -> int:
         path: Path | None = None
         if format_name == "md":
             path = exports / f"{base}.md"
-            path.write_text(markdown, encoding="utf-8")
+            path.write_text(rebase_markdown_assets(markdown, markdown_path.parent, path.parent), encoding="utf-8")
         elif format_name == "split_md":
             path = exports / f"{base}_chapters"
-            make_split_md(markdown, path)
+            make_split_md(markdown, path, asset_root=markdown_path.parent)
         elif format_name == "html":
             path = exports / f"{base}.html"
-            path.write_text(markdown_to_html(markdown, base), encoding="utf-8")
+            path.write_text(markdown_to_html(markdown, base, asset_root=markdown_path.parent,
+                                             output_dir=path.parent), encoding="utf-8")
         elif format_name == "docx":
             path = exports / f"{base}.docx"
             add_markdown_to_docx(markdown, path, base, markdown_path.parent)

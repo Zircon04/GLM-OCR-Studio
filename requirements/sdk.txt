@@ -1,9 +1,11 @@
 pymupdf>=1.24.0
 python-docx
 reportlab
+Markdown
+matplotlib
 psutil
 Pillow
 requests
 rich
 python-dotenv
--e ./GLM-OCR
+-e ./GLM-OCR[layout]

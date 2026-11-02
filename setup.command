@@ -41,29 +41,24 @@ fi
 
 echo "Используется Python: $PY_BIN ($("$PY_BIN" --version))"
 
-# Create virtual environments if missing
+# Create missing environments, but always reconcile requirements. A directory
+# can remain after an interrupted install and is not a completion marker.
 echo "==> Проверка окружений Python..."
 
-if [[ ! -d ".venv-mlx" ]]; then
-  echo "Создание .venv-mlx..."
-  "$PY_BIN" -m venv .venv-mlx
-  ./.venv-mlx/bin/pip install --upgrade pip setuptools wheel
-  ./.venv-mlx/bin/pip install -r requirements/mlx.txt
-fi
-
-if [[ ! -d ".venv-enhance" ]]; then
-  echo "Создание .venv-enhance..."
-  "$PY_BIN" -m venv .venv-enhance
-  ./.venv-enhance/bin/pip install --upgrade pip setuptools wheel
-  ./.venv-enhance/bin/pip install -r requirements/enhance.txt
-fi
-
-if [[ ! -d ".venv-sdk" ]]; then
-  echo "Создание .venv-sdk..."
-  "$PY_BIN" -m venv .venv-sdk
-  ./.venv-sdk/bin/pip install --upgrade pip setuptools wheel
-  ./.venv-sdk/bin/pip install -r requirements/sdk.txt
-fi
+for name in mlx enhance sdk; do
+  env_dir=".venv-$name"
+  if [[ ! -x "$env_dir/bin/python" ]]; then
+    echo "Создание/восстановление $env_dir..."
+    "$PY_BIN" -m venv "$env_dir"
+  fi
+  echo "Проверка зависимостей $env_dir..."
+  # uv-created environments can have a working Python without a pip module.
+  if ! "$env_dir/bin/python" -m pip --version >/dev/null 2>&1; then
+    "$env_dir/bin/python" -m ensurepip --upgrade
+  fi
+  "$env_dir/bin/python" -m pip install --upgrade pip setuptools wheel
+  "$env_dir/bin/python" -m pip install -r "requirements/$name.txt"
+done
 
 # Compile Swift GUI App
 echo "==> Сборка приложения macOS (GLM OCR Local.app)..."

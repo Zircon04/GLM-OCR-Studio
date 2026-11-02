@@ -1069,6 +1069,10 @@ def make_searchable_pdf(
                 doc.set_toc(ocr_outline)
             except Exception as exc:
                 _warn(f"оглавление OCR не записано: {exc}")
+        # macOS Arial Unicode is about 23 MB: embed only used glyphs rather
+        # than letting a full font dwarf the recompressed page images.
+        # Subsetting preserves the Unicode text map used for search/copy.
+        doc.subset_fonts()
         # garbage/deflate/clean сжимают структуру и потоки, но не перерисовывают текст.
         doc.save(part, garbage=3, deflate=True, clean=True)
     except Exception:

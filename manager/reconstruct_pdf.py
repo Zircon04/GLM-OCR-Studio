@@ -127,6 +127,20 @@ def formula_png(content: str) -> bytes | None:
         return None
 
 
+def original_formula_png(source: Path, page_index: int, bbox: list[float]) -> bytes | None:
+    """Preserve the scanned expression when MathText cannot represent its LaTeX."""
+    try:
+        with pymupdf.open(source) as original:
+            page = original[page_index]
+            clip = block_rect(page, bbox) & page.rect
+            if clip.is_empty:
+                return None
+            return page.get_pixmap(clip=clip, dpi=180, alpha=False).tobytes("png")
+    except Exception as exc:
+        print(f"CLEAN_PDF_WARNING cannot preserve formula on page {page_index + 1}: {exc}", flush=True)
+        return None
+
+
 def enhanced_map(result: Path) -> dict[str, Path]:
     manifest = result / "image-enhancement-manifest.json"
     mapping: dict[str, Path] = {}
@@ -205,6 +219,8 @@ def build(source: Path, json_path: Path, result: Path, output: Path) -> None:
                 continue
             if label in {"formula", "display_formula", "inline_formula", "equation", "isolate_formula"}:
                 rendered = formula_png(content)
+                if not rendered:
+                    rendered = original_formula_png(source, page_index, bbox)
                 if rendered:
                     try: page.insert_image(rect, stream=rendered, keep_proportion=True, overlay=True)
                     except Exception: rendered = None
@@ -237,6 +253,7 @@ def build(source: Path, json_path: Path, result: Path, output: Path) -> None:
 
     document.set_metadata({"title": result.name, "author": "GLM OCR Local",
                            "subject": "Цифровая реконструкция OCR с локальной обработкой MLX/Metal"})
+    document.subset_fonts()
     document.save(output, garbage=4, deflate=True, clean=True)
     document.close()
 
