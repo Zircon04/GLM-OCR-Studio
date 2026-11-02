@@ -1,9 +1,9 @@
-﻿# GLM-OCR на Windows через Ollama. GTX 1060 6 ГБ и RTX — один и тот же путь.
+﻿# GLM-OCR на Windows. RTX -> CUDA через WSL2 (rtx-wsl.ps1), GTX 1060/Pascal -> Ollama.
 #
 # НЕ ПРОВЕРЯЛОСЬ НА WINDOWS.
 #
-# RTX здесь не требуется. Ограничение compute capability 7.5+ есть только у vLLM,
-# а vLLM в обычный Windows не ставится. Этот скрипт поднимает Ollama:
+# Ниже — Ollama-путь для карт без RTX (vLLM требует compute 7.5+ и в обычный Windows
+# не ставится, поэтому RTX идёт через WSL2). Ollama:
 # на 6 ГБ квант q8_0, на картах от 8 ГБ — F16.
 # Скорость на Pascal ниже, чем на RTX: тензорных ядер нет.
 #
@@ -13,6 +13,22 @@
 #   .\windows\start-glm-ocr.ps1
 
 $ErrorActionPreference = "Stop"
+
+# RTX (compute >= 7.5): нативный CUDA-путь через WSL2 (windows\rtx-wsl.ps1).
+# Ollama-путь для RTX: $env:GLMOCR_BACKEND = "ollama"
+function Test-RtxCuda {
+    if ($env:GLMOCR_BACKEND -eq "ollama") { return $false }
+    if ($env:GLMOCR_BACKEND -eq "cuda") { return $true }
+    if (-not (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) { return $false }
+    $cap = (& nvidia-smi --query-gpu=compute_cap --format=csv,noheader,nounits | Select-Object -First 1)
+    $v = 0.0
+    if (-not [double]::TryParse(($cap -as [string]).Trim(), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$v)) { return $false }
+    return ($v -ge 7.5)
+}
+if (Test-RtxCuda) {
+    & "$PSScriptRoot\rtx-wsl.ps1" start @args
+    exit $LASTEXITCODE
+}
 Write-Host "НЕ ПРОВЕРЯЛОСЬ НА WINDOWS."
 
 $Root = Split-Path -Parent $PSScriptRoot

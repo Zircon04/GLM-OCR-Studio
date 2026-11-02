@@ -41,3 +41,6 @@ gui/GLMOCRLocal*
 *.tar.gz
 *.dmg
 release/
+
+# Выбранный NVIDIA-бэкенд (пишет setup-nvidia.sh)
+config/nvidia-backend

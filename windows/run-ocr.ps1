@@ -4,6 +4,22 @@
 #   .\windows\run-ocr.ps1 C:\путь\к\файлу.pdf
 
 $ErrorActionPreference = "Stop"
+
+# RTX (compute >= 7.5): нативный CUDA-путь через WSL2 (windows\rtx-wsl.ps1).
+# Ollama-путь для RTX: $env:GLMOCR_BACKEND = "ollama"
+function Test-RtxCuda {
+    if ($env:GLMOCR_BACKEND -eq "ollama") { return $false }
+    if ($env:GLMOCR_BACKEND -eq "cuda") { return $true }
+    if (-not (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) { return $false }
+    $cap = (& nvidia-smi --query-gpu=compute_cap --format=csv,noheader,nounits | Select-Object -First 1)
+    $v = 0.0
+    if (-not [double]::TryParse(($cap -as [string]).Trim(), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$v)) { return $false }
+    return ($v -ge 7.5)
+}
+if (Test-RtxCuda) {
+    & "$PSScriptRoot\rtx-wsl.ps1" run @args
+    exit $LASTEXITCODE
+}
 Write-Host "НЕ ПРОВЕРЯЛОСЬ НА WINDOWS."
 
 $Root = Split-Path -Parent $PSScriptRoot

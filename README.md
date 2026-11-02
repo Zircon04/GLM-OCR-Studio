@@ -2,7 +2,7 @@
 
 > **Полностью автономная (offline) рабочая станция оптического распознавания текста (OCR) и анализа документов для Mac на базе Apple Silicon (M1/M2/M3/M4).** Текущая версия исходников: **1.2.0**.
 
-В 1.2.0: поисковый PDF с текстом по координатам блоков, выбор папки результата, склейка переносов в Markdown, очистка временных файлов и интерфейс Liquid Glass (на macOS 26 — системное стекло). Для GTX 1060 и других карт без RTX добавлен запуск через Ollama. Скрипты Windows в релиз входят, но на Windows не проверялись. Готовый zip для Mac по-прежнему собирается на самом Mac: `./scripts/package_release.sh 1.2.0`.
+В 1.2.0: поисковый PDF с текстом по координатам блоков, выбор папки результата, склейка переносов в Markdown, очистка временных файлов и интерфейс Liquid Glass (на macOS 26 — системное стекло). Для RTX — нативный CUDA-путь через vLLM (на Windows — через WSL2), для GTX 1060 и других карт без RTX — Ollama. Скрипты Windows в релиз входят, но на Windows не проверялись. Готовый zip для Mac по-прежнему собирается на самом Mac: `./scripts/package_release.sh 1.2.0`.
 
 [English Description Below](#english-overview)
 
@@ -104,19 +104,33 @@ open "GLM OCR Local.app"
 
 ## NVIDIA (Linux) и Windows
 
-Приложение Swift остаётся только для Mac на Apple Silicon. На NVIDIA тот же пайплайн ходит в Ollama, а не в MLX.
+Приложение Swift остаётся только для Mac на Apple Silicon. На NVIDIA работает тот же пайплайн из командной строки. Бэкенд выбирается автоматически по compute capability карты (`nvidia-smi`):
 
-RTX для этого не нужен. vLLM и SGLang требуют compute capability 7.5+ (GeForce RTX 20 и новее) и на GTX 1060 не запускаются. GTX 1060 6 ГБ идёт через Ollama, квант `glm-ocr:q8_0`. На картах от 8 ГБ скрипт берёт F16. Детектор вёрстки сидит на CPU, на видеокарте один запрос за раз. Апскейл RealESRGAN в этом режиме выключен: он собран под MLX.
+| Карта | Compute | Бэкенд | Где считается модель |
+|---|---|---|---|
+| RTX 20/30/40/50 и новее | ≥ 7.5 | **CUDA (vLLM)** — по умолчанию | Напрямую на CUDA и тензорных ядрах, как MLX на Mac. Детектор вёрстки PP-DocLayoutV3 тоже на CUDA |
+| GTX 10xx (1060 и др.), Pascal и старше | < 7.5 | **Ollama** | llama.cpp, квант `glm-ocr:q8_0` на 6 ГБ, F16 от 8 ГБ. Детектор вёрстки на CPU |
 
-Linux, включая карту без RTX:
+Переопределить выбор: `GLMOCR_BACKEND=cuda` или `GLMOCR_BACKEND=ollama` (например, RTX через Ollama). Апскейл Real-ESRGAN на NVIDIA выключен в обоих режимах: он собран под MLX.
+
+> **Не проверялось на реальных картах NVIDIA.** Скрипты написаны по документации GLM-OCR и vLLM, но ни на RTX, ни на GTX, ни на Windows не запускались.
+
+### Linux (или WSL2)
 
 ```bash
-./setup-nvidia.sh
-./start-glm-ocr-nvidia.sh
-./run-ocr-nvidia.sh /путь/к/скану.pdf
+./setup-nvidia.sh            # RTX: .venv-sdk с CUDA-torch + .venv-vllm (vllm>=0.19); Pascal: CPU-torch
+./start-glm-ocr-nvidia.sh    # RTX: vllm serve zai-org/GLM-OCR :8080; Pascal: Ollama :11434
+./run-ocr-nvidia.sh /путь/к/скану.pdf [/папка/результатов]
+./stop-glm-ocr-nvidia.sh
 ```
 
-Windows, те же карты, и 1060, и RTX:
+RTX-путь: `vllm serve zai-org/GLM-OCR --served-model-name glm-ocr --port 8080` с MTP-спекуляцией (`--speculative-config '{"method": "mtp", "num_speculative_tokens": 3}'`, как в README GLM-OCR). Доля видеопамяти подбирается по объёму карты (0.60 на 8 ГБ … 0.80 на 24 ГБ+), остаток — детектору вёрстки и рабочему столу. Конфиг SDK — `config/nvidia-rtx.yaml`, профиль — `config/nvidia-rtx.env`. Журнал и PID — `logs/vllm-rtx.*`.
+
+Настройки через переменные: `GLMOCR_GPU_UTIL` (доля VRAM), `GLMOCR_MAX_MODEL_LEN` (по умолчанию 16384, на 8 ГБ — 8192), `GLMOCR_MAX_NUM_SEQS` (16), `GLMOCR_VLLM_MTP=0` (выключить спекуляцию), `GLMOCR_VLLM_PORT`, `TORCH_CUDA_INDEX` (колёса PyTorch, по умолчанию cu128 — нужен драйвер ≥ 570), `GLMOCR_LAYOUT_DEVICE=cpu` (детектор вёрстки на CPU, если не хватает VRAM).
+
+Если vLLM не стартует по памяти: `GLMOCR_GPU_UTIL=0.5 GLMOCR_MAX_MODEL_LEN=8192 ./start-glm-ocr-nvidia.sh`. Запасной путь: `GLMOCR_BACKEND=ollama`.
+
+### Windows
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
@@ -125,9 +139,11 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\windows\run-ocr.ps1 C:\путь\к\скану.pdf
 ```
 
-Нужны драйвер NVIDIA, [Ollama для Windows](https://ollama.com/download) и Python 3.10–3.12. vLLM этот сценарий не ставит даже на RTX: в обычный Windows он не ставится, только в WSL.
+- **RTX (compute ≥ 7.5):** vLLM в обычный Windows не ставится, поэтому эти скрипты сами передают работу в **WSL2** (`windows\rtx-wsl.ps1`), где модель считается на CUDA той же видеокарты. Один раз: `wsl --install -d Ubuntu`, свежий драйвер NVIDIA для Windows, в Ubuntu `sudo apt install python3 python3-venv curl`. Остановка: `.\windows\rtx-wsl.ps1 stop`. Дистрибутив — `$env:GLMOCR_WSL_DISTRO`.
+- **GTX 1060 и другие карты без RTX:** прежний путь через [Ollama для Windows](https://ollama.com/download) и Python 3.10–3.12.
+- RTX через Ollama без WSL: `$env:GLMOCR_BACKEND = "ollama"`.
 
-**Сборка для Windows не проверялась.** Скрипты в `windows/` написаны по схеме Linux-версии и на реальной Windows-машине не запускались.
+**Сборка для Windows не проверялась.**
 
 ---
 

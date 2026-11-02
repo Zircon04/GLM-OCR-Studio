@@ -1,130 +1,102 @@
 #!/bin/bash
-# GLM-OCR на NVIDIA без RTX. GTX 1060 6 ГБ — основной случай.
+# Запуск сервера модели GLM-OCR на NVIDIA (Linux / WSL2). НЕ ПРОВЕРЯЛОСЬ НА РЕАЛЬНОЙ КАРТЕ.
 #
-# vLLM/SGLang требуют compute capability 7.5+ (GeForce RTX 20 и новее).
-# 1060 — это Pascal 6.1, официальный vLLM на ней не запускается.
-# Здесь модель крутится через Ollama (llama.cpp): веса q8_0 около 1.6 ГБ,
-# вместе с проектором и рабочим столом помещаются в 6 ГБ.
-# Скорость ниже, чем на RTX или Apple Silicon: тензорных ядер нет.
-# Скрипты windows/*.ps1 — тот же Ollama-путь, не «только RTX». На Windows они не проверялись.
+#   RTX (compute >= 7.5): vllm serve zai-org/GLM-OCR на CUDA, порт 8080, MTP-спекуляция.
+#   Pascal/GTX 10xx:      Ollama (scripts/start-ollama-nvidia.sh), порт 11434.
+# Переопределение: GLMOCR_BACKEND=cuda|ollama. Остановка: ./stop-glm-ocr-nvidia.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
-mkdir -p "$ROOT/logs" "$ROOT/config"
-MODEL_ALIAS="glm-ocr-pascal"
-MODELFILE="$ROOT/config/ollama-pascal.Modelfile"
-LOG_FILE="$ROOT/logs/ollama-pascal.log"
-HEALTH_URL="http://127.0.0.1:11434/api/tags"
+mkdir -p "$ROOT/logs"
 
 if ! command -v nvidia-smi >/dev/null 2>&1; then
-  echo "nvidia-smi не найден. Поставьте драйвер NVIDIA."
-  echo "Без видеокарты Ollama всё равно может считать на CPU, но это будет медленно:"
-  echo "  ollama pull glm-ocr:q8_0 && ollama serve"
+  echo "nvidia-smi не найден. Поставьте драйвер NVIDIA (в WSL2 — драйвер Windows с поддержкой WSL)."
+  exit 1
+fi
+if [[ -z "${GLMOCR_BACKEND:-}" && -f "$ROOT/config/nvidia-backend" ]]; then
+  GLMOCR_BACKEND="$(tr -cd 'a-z' < "$ROOT/config/nvidia-backend")"
+fi
+# shellcheck source=scripts/nvidia-backend.sh
+source "$ROOT/scripts/nvidia-backend.sh"
+echo "Карта: $GPU_NAME, compute $COMPUTE_CAP, всего ${VRAM_MIB} МиБ, свободно ${FREE_MIB} МиБ -> $GLMOCR_BACKEND"
+
+if [[ "$GLMOCR_BACKEND" == ollama ]]; then
+  exec "$ROOT/scripts/start-ollama-nvidia.sh"
+fi
+
+VLLM="$ROOT/.venv-vllm/bin/vllm"
+PORT="${GLMOCR_VLLM_PORT:-8080}"
+HEALTH_URL="http://127.0.0.1:${PORT}/health"
+LOG_FILE="$ROOT/logs/vllm-rtx.log"
+PID_FILE="$ROOT/logs/vllm-rtx.pid"
+if [[ ! -x "$VLLM" ]]; then
+  echo "Нет .venv-vllm. Один раз выполните: ./setup-nvidia.sh"
   exit 1
 fi
 
-IFS=',' read -r GPU_NAME VRAM_MIB COMPUTE_CAP < <(
-  nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv,noheader,nounits | head -1
-)
-GPU_NAME="$(echo "$GPU_NAME" | sed 's/^ *//;s/ *$//')"
-VRAM_MIB="$(echo "$VRAM_MIB" | tr -cd '0-9')"
-COMPUTE_CAP="$(echo "$COMPUTE_CAP" | sed 's/^ *//;s/ *$//')"
-FREE_MIB="$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -1 | tr -cd '0-9')"
-echo "Карта: $GPU_NAME, compute $COMPUTE_CAP, всего ${VRAM_MIB} МиБ, свободно ${FREE_MIB} МиБ"
+if curl --silent --fail --max-time 2 "$HEALTH_URL" >/dev/null 2>&1; then
+  echo "vLLM уже отвечает на $PORT."
+  exit 0
+fi
 
-MAJOR="${COMPUTE_CAP%%.*}"
-MINOR="${COMPUTE_CAP#*.}"
-MINOR="${MINOR%%.*}"
-# 7.5 и выше — Turing/RTX. Ниже vLLM ставить бессмысленно.
-if (( MAJOR < 7 || (MAJOR == 7 && MINOR < 5) )); then
-  echo "Compute $COMPUTE_CAP ниже 7.5: vLLM и SGLang эту карту не поддерживают. Берём Ollama."
+# Доля VRAM для vLLM (веса 0.9B ~2 ГБ + KV-кэш). Остаток — детектору вёрстки
+# (~1–1.5 ГБ на CUDA) и рабочему столу. Переопределение: GLMOCR_GPU_UTIL=0.xx
+if [[ -n "${GLMOCR_GPU_UTIL:-}" ]]; then
+  UTIL="$GLMOCR_GPU_UTIL"
+elif (( VRAM_MIB <= 8192 )); then
+  UTIL=0.60
+elif (( VRAM_MIB <= 12288 )); then
+  UTIL=0.70
+elif (( VRAM_MIB <= 16384 )); then
+  UTIL=0.75
 else
-  echo "Карта подходит и для vLLM, но этот сценарий всё равно поднимает Ollama:"
-  echo "на одной карте так проще удержать память. Для vLLM смотрите README GLM-OCR."
+  UTIL=0.80
+fi
+MAX_LEN="${GLMOCR_MAX_MODEL_LEN:-16384}"
+if (( VRAM_MIB <= 8192 )) && [[ -z "${GLMOCR_MAX_MODEL_LEN:-}" ]]; then
+  MAX_LEN=8192
+fi
+MAX_SEQS="${GLMOCR_MAX_NUM_SEQS:-16}"
+
+ARGS=(serve zai-org/GLM-OCR
+  --served-model-name glm-ocr
+  --host 127.0.0.1 --port "$PORT"
+  --gpu-memory-utilization "$UTIL"
+  --max-model-len "$MAX_LEN"
+  --max-num-seqs "$MAX_SEQS"
+  --dtype auto)
+# MTP-спекуляция из GLM-OCR/README.md. Отключить: GLMOCR_VLLM_MTP=0
+if [[ "${GLMOCR_VLLM_MTP:-1}" != 0 ]]; then
+  ARGS+=(--speculative-config '{"method": "mtp", "num_speculative_tokens": 3}')
 fi
 
-if (( VRAM_MIB <= 6144 || FREE_MIB < 4500 )); then
-  TAG="glm-ocr:q8_0"
-  echo "Мало видеопамяти — квант q8_0 (около 1.6 ГБ). F16 сюда лучше не класть."
-else
-  TAG="glm-ocr:latest"
-  echo "Памяти хватает на F16 (glm-ocr:latest, около 2.7 ГБ с проектором)."
-fi
+echo "Запускаю vLLM: util=$UTIL, max-model-len=$MAX_LEN, max-num-seqs=$MAX_SEQS. Журнал: $LOG_FILE"
+nohup "$VLLM" "${ARGS[@]}" >>"$LOG_FILE" 2>&1 &
+echo $! >"$PID_FILE"
 
-if ! command -v ollama >/dev/null 2>&1; then
-  echo "Ollama не установлена."
-  echo "Linux:  curl -fsSL https://ollama.com/install.sh | sh"
-  echo "Windows: https://ollama.com/download  и затем этот скрипт из WSL."
-  exit 1
-fi
-
-export OLLAMA_NUM_PARALLEL=1
-export OLLAMA_MAX_LOADED_MODELS=1
-export OLLAMA_KEEP_ALIVE=30m
-export OLLAMA_HOST="${OLLAMA_HOST:-127.0.0.1:11434}"
-if (( VRAM_MIB <= 8192 )); then
-  # Меньше места под KV-кэш. На 0.9B это не качество текста, а запас по памяти.
-  export OLLAMA_KV_CACHE_TYPE="${OLLAMA_KV_CACHE_TYPE:-q8_0}"
-fi
-
-if ! curl --silent --fail --max-time 2 "$HEALTH_URL" >/dev/null 2>&1; then
-  echo "Запускаю ollama serve…"
-  nohup ollama serve >>"$LOG_FILE" 2>&1 &
-  echo $! >"$ROOT/ollama-pascal.pid"
-  for _ in $(seq 1 30); do
-    if curl --silent --fail --max-time 2 "$HEALTH_URL" >/dev/null 2>&1; then
-      break
-    fi
-    sleep 1
-  done
-else
-  echo "Ollama уже слушает 11434. Параллельность этого процесса могла быть задана раньше."
-  echo "Если распознавание упрётся в память, перезапустите serve с OLLAMA_NUM_PARALLEL=1."
-fi
-
-if ! curl --silent --fail --max-time 2 "$HEALTH_URL" >/dev/null 2>&1; then
-  echo "Ollama не поднялась. Журнал: $LOG_FILE"
-  exit 1
-fi
-
-echo "Скачиваю $TAG …"
-if ! ollama pull "$TAG"; then
-  if [[ "$TAG" != "glm-ocr:latest" ]]; then
-    echo "Тег $TAG недоступен, беру glm-ocr:latest. На 6 ГБ закройте лишние программы: F16 тяжелее."
-    TAG="glm-ocr:latest"
-    ollama pull "$TAG"
-  else
+# Первый старт скачивает веса (~2 ГБ) и компилирует CUDA-графы: до 10 минут.
+for _ in $(seq 1 600); do
+  if curl --silent --fail --max-time 2 "$HEALTH_URL" >/dev/null 2>&1; then
+    break
+  fi
+  if ! kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+    echo "vLLM завершился при старте. Последние строки журнала:"
+    tail -n 30 "$LOG_FILE"
+    echo "Если не хватило памяти: GLMOCR_GPU_UTIL=0.5 GLMOCR_MAX_MODEL_LEN=8192 ./start-glm-ocr-nvidia.sh"
+    echo "Запасной путь: GLMOCR_BACKEND=ollama ./start-glm-ocr-nvidia.sh"
     exit 1
   fi
-fi
-
-cat >"$MODELFILE" <<EOF
-FROM $TAG
-PARAMETER num_ctx 8192
-PARAMETER temperature 0
-PARAMETER num_predict 4096
-EOF
-ollama create "$MODEL_ALIAS" -f "$MODELFILE"
-
-echo "Прогрев модели…"
-if ! curl --silent --fail --max-time 180 "http://127.0.0.1:11434/api/generate" \
-  -H 'Content-Type: application/json' \
-  -d "{\"model\":\"$MODEL_ALIAS\",\"prompt\":\"Text Recognition:\",\"stream\":false,\"options\":{\"num_predict\":8}}" \
-  >/dev/null; then
-  echo "Модель не ответила. Частая причина на 1060 — рабочий стол уже занял часть 6 ГБ."
-  echo "Закройте браузер и игры и запустите скрипт снова. Журнал: $LOG_FILE"
+  sleep 1
+done
+if ! curl --silent --fail --max-time 2 "$HEALTH_URL" >/dev/null 2>&1; then
+  echo "vLLM не ответил за 10 минут. Журнал: $LOG_FILE"
   exit 1
 fi
 
-cat <<EOF
+cat <<EOT
 
-Сервер готов: http://127.0.0.1:11434  (модель $MODEL_ALIAS из $TAG).
-Дальше, из корня репозитория:
-
-  ./run-ocr-nvidia.sh /путь/к/скану.pdf
-
-Ожидание по скорости: одна страница из нескольких блоков — десятки секунд,
-не доли секунды. Это нормально для Pascal без тензорных ядер.
-Первый запуск ещё скачает детектор вёрстки PP-DocLayoutV3 на CPU.
-EOF
+Сервер готов: http://127.0.0.1:${PORT}  (vLLM, модель glm-ocr на CUDA).
+Дальше: ./run-ocr-nvidia.sh /путь/к/скану.pdf
+Остановить: ./stop-glm-ocr-nvidia.sh
+EOT
