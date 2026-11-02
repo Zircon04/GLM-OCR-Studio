@@ -29,7 +29,10 @@ def inspect(root: Path) -> dict:
     json_candidates = [p for p in final_dir.rglob("*.json") if "_model" not in p.name and "manifest" not in p.name]
     json_path = exact_json if exact_json.exists() else (sorted(json_candidates, key=lambda p: len(p.parts))[0] if json_candidates else None)
     html_path = first_file(root / "exports", "*.html") if (root / "exports").exists() else None
-    exports = sorted(str(p) for p in (root / "exports").glob("*") if p.is_file()) if (root / "exports").exists() else []
+    exports = []
+    export_dir = root / "exports"
+    if export_dir.exists():
+        exports = sorted(str(p) for p in export_dir.iterdir() if p.is_file() or p.name.endswith("_chapters"))
 
     pages: list = []
     if json_path:
@@ -65,9 +68,36 @@ def inspect(root: Path) -> dict:
         except Exception:
             pass
     if not pairs:
-        for image in final_dir.rglob("imgs/*"):
-            if image.is_file():
-                pairs.append({"original": str(image), "enhanced": "", "method": ""})
+        def collect(folder: str) -> dict[str, Path]:
+            found: dict[str, Path] = {}
+            for path in final_dir.rglob("*"):
+                if not path.is_file() or ".job" in path.parts or folder not in path.parts:
+                    continue
+                if folder == "imgs" and "imgs_enhanced" in path.parts:
+                    continue
+                index = path.parts.index(folder)
+                found[Path(*path.parts[index + 1:]).as_posix()] = path
+            return found
+
+        enhanced = collect("imgs_enhanced")
+        for rel, original in sorted(collect("imgs").items()):
+            stem = Path(rel)
+            match = next(
+                (
+                    item for item in (
+                        enhanced.get(rel),
+                        enhanced.get(stem.with_suffix(".webp").as_posix()),
+                        enhanced.get(stem.with_suffix(".png").as_posix()),
+                    )
+                    if item is not None
+                ),
+                None,
+            )
+            pairs.append({
+                "original": str(original),
+                "enhanced": str(match) if match else "",
+                "method": "",
+            })
 
     return {
         "root": str(root), "final_dir": str(final_dir),

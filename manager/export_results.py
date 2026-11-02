@@ -116,6 +116,18 @@ def rebase_markdown_assets(markdown: str, asset_root: Path, output_dir: Path, *,
     return text
 
 
+CLI_EXPORTS = {"md", "split_md", "searchable_pdf"}
+INTERNAL_EXPORTS = CLI_EXPORTS | {"html", "docx", "clean_pdf", "zip"}
+
+
+def rewrite_image_links(markdown: str, source_dir: Path, dest_file: Path) -> str:
+    """Пути картинок считаются от файла, куда пишется Markdown.
+
+    Формулы и код остаются как есть. Исходные ссылки ищутся от папки книги.
+    """
+    return rebase_markdown_assets(markdown, source_dir, dest_file.parent)
+
+
 def markdown_to_html(markdown: str, base: str, *, asset_root: Path | None = None,
                      output_dir: Path | None = None) -> str:
     try:
@@ -278,11 +290,12 @@ def main() -> int:
     source = Path(args.source)
     output_root = Path(args.output_root)
     requested = [item.strip() for item in args.formats.split(",") if item.strip()]
-    allowed = {"md", "split_md", "searchable_pdf"}
-    unsupported = [item for item in requested if item not in allowed]
-    if unsupported or not requested:
-        emit("export_error", message="Unsupported or empty export formats; supported: md,split_md,searchable_pdf",
-             unsupported=unsupported)
+    if not requested:
+        emit("export_error", message="Список форматов пуст")
+        return 2
+    unknown = [item for item in requested if item not in INTERNAL_EXPORTS]
+    if unknown:
+        emit("export_error", message="Неизвестный формат: " + ", ".join(unknown), unsupported=unknown)
         return 2
     formats = list(dict.fromkeys(requested))
     exports = output_root / "exports"
@@ -338,8 +351,7 @@ def main() -> int:
                 }
                 if args.downsample_dpi is not None:
                     kwargs["downsample_dpi"] = args.downsample_dpi
-                if args.jpeg_quality is not None:
-                    kwargs["jpeg_quality"] = args.jpeg_quality
+                kwargs["jpeg_quality"] = args.jpeg_quality
                 make_searchable_pdf(source, json_path, path, **kwargs)
             except Exception as exc:
                 emit("export_error", format=format_name, message=f"Searchable PDF: {exc}")

@@ -1,166 +1,243 @@
 #!/usr/bin/env python3
-"""Lossless, bounded per-image optimization before per-book final cleanup."""
+"""Перепаковка картинок без смены пикселей после экспорта одного документа.
+
+Исходные PNG остаются PNG. У улучшенных PNG пробуется меньший lossless WebP.
+Новый файл пишется рядом, Markdown обновляется атомарно, и только потом
+удаляется заменённый PNG. Если ссылка на старое имя где-то осталась, имя
+не меняется: PNG только перепаковывается.
+"""
+
 from __future__ import annotations
 
-import argparse
-import json
 import os
 import re
-import html
-from urllib.parse import unquote
 from pathlib import Path
+from typing import Any, Callable
 
-from PIL import Image, features
+try:
+    from PIL import Image
+except Exception:  # pragma: no cover
+    Image = None  # type: ignore
+
+Progress = Callable[[int, int, str], None]
+_FENCE = re.compile(r"(```.*?```|\$\$.*?\$\$|`[^`\n]*`)", re.DOTALL)
+_MD_TARGET = re.compile(r"(!?\[[^\]]*\]\()([^)\s]+)(\))")
+_HTML_SRC = re.compile(r"(<img\b[^>]*\bsrc=[\"'])([^\"']+)([\"'])", re.IGNORECASE)
 
 
-def _identical(image: Image.Image, candidate: Path) -> bool:
-    with Image.open(candidate) as restored:
-        return (not getattr(restored, "is_animated", False)
-                and restored.size == image.size
-                and restored.convert("RGBA").tobytes() == image.convert("RGBA").tobytes()
-                and restored.info.get("icc_profile", b"") == image.info.get("icc_profile", b""))
+def _emit(progress: Progress | None, done: int, total: int, name: str) -> None:
+    if progress is not None:
+        progress(done, total, name)
 
 
-def optimize_image(source: Path, *, allow_webp: bool = True) -> Path:
-    """Return smaller verified pixels; retain source if changing its filename.
+def _icc(image: Image.Image) -> bytes | None:
+    profile = image.info.get("icc_profile")
+    return profile if isinstance(profile, bytes) else None
 
-    Existing files are never overwritten by a WebP conversion. Atomic in-place
-    PNG recompression is safe before link commit because pixels do not change.
-    """
-    if source.is_symlink() or source.suffix.lower() != ".png":
-        return source
-    initial_size = source.stat().st_size
-    png_part = source.with_name(source.name + ".optimize-png.part")
-    webp_part = source.with_name(source.name + ".optimize-webp.part")
-    webp = source.with_name(source.name + ".lossless.webp")
+
+def _rgba(image: Image.Image) -> bytes:
+    return image.convert("RGBA").tobytes()
+
+
+def _animated(image: Image.Image) -> bool:
+    return bool(getattr(image, "is_animated", False) or getattr(image, "n_frames", 1) > 1)
+
+
+def _supported(image: Image.Image) -> bool:
+    if _animated(image):
+        return False
+    return image.mode in {"1", "L", "LA", "P", "RGB", "RGBA"}
+
+
+def _same_pixels(left: Image.Image, right: Image.Image) -> bool:
+    return left.size == right.size and _rgba(left) == _rgba(right) and _icc(left) == _icc(right)
+
+
+def _save_png(image: Image.Image, dest: Path) -> None:
+    extra: dict[str, Any] = {}
+    profile = _icc(image)
+    if profile:
+        extra["icc_profile"] = profile
+    image.save(dest, format="PNG", optimize=True, **extra)
+
+
+def _save_webp(image: Image.Image, dest: Path) -> None:
+    extra: dict[str, Any] = {"lossless": True, "quality": 100, "method": 6}
+    profile = _icc(image)
+    if profile:
+        extra["icc_profile"] = profile
+    image.save(dest, format="WEBP", **extra)
+
+
+def _repack_png(path: Path) -> int:
+    """Меньший PNG с теми же пикселями. Возвращает сэкономленные байты."""
+    if Image is None or path.suffix.lower() != ".png":
+        return 0
+    before = path.stat().st_size
     try:
-        with Image.open(source) as image:
-            if getattr(image, "is_animated", False) or image.mode not in {"1", "L", "LA", "P", "RGB", "RGBA"}:
-                return source
+        with Image.open(path) as image:
             image.load()
-            metadata = {key: image.info[key] for key in ("icc_profile", "exif", "dpi") if key in image.info}
-            # Preserve palette transparency rather than flattening the image.
-            if "transparency" in image.info:
-                metadata["transparency"] = image.info["transparency"]
-            image.save(png_part, format="PNG", optimize=True, compress_level=9, **metadata)
-            best = png_part if png_part.stat().st_size < initial_size and _identical(image, png_part) else source
-            if allow_webp and features.check("webp"):
-                if webp.exists():
-                    candidate = webp if _identical(image, webp) else None
-                else:
-                    options = {key: image.info[key] for key in ("icc_profile", "exif") if key in image.info}
-                    try:
-                        image.save(webp_part, format="WEBP", lossless=True, exact=True, quality=100, method=6, **options)
-                        candidate = webp_part if _identical(image, webp_part) else None
-                    except (OSError, ValueError):
-                        candidate = None  # e.g. dimensions outside the WebP limit
-                if candidate is not None and candidate.stat().st_size < best.stat().st_size:
-                    best = candidate
-            if best == source or initial_size - best.stat().st_size < max(128, initial_size // 100):
-                return source
-            if best == png_part:
-                os.replace(png_part, source)
-                return source
-            if best == webp_part:
-                os.replace(webp_part, webp)
-            return webp
-    finally:
-        png_part.unlink(missing_ok=True)
-        webp_part.unlink(missing_ok=True)
+            if not _supported(image):
+                return 0
+            snapshot = image.copy()
+        temp = path.with_name(path.name + ".repack.png")
+        _save_png(snapshot, temp)
+        with Image.open(temp) as packed, Image.open(path) as original:
+            original.load()
+            packed.load()
+            if temp.stat().st_size >= before or not _same_pixels(original, packed):
+                temp.unlink(missing_ok=True)
+                return 0
+        temp.replace(path)
+        return before - path.stat().st_size
+    except Exception:
+        return 0
 
 
-def _emit(kind: str, **payload) -> None:
-    print("GLMOCR_EVENT " + json.dumps({"type": kind, **payload}, ensure_ascii=False), flush=True)
+def _protected_sub(text: str, pattern: re.Pattern[str], replacer) -> str:
+    pieces = _FENCE.split(text)
+    out: list[str] = []
+    for index, piece in enumerate(pieces):
+        if index % 2 == 1:
+            out.append(piece)
+        else:
+            out.append(pattern.sub(replacer, piece))
+    return "".join(out)
 
 
-def _atomic_text(path: Path, content: str) -> None:
-    part = path.with_name(path.name + ".optimize.part")
-    try:
-        part.write_text(content, encoding="utf-8")
-        os.replace(part, path)
-    finally:
-        part.unlink(missing_ok=True)
+def rewrite_names(text: str, replacements: dict[str, str]) -> str:
+    """Меняет только пути картинок. Формулы, код и ограждения не трогает."""
+
+    def swap(raw: str) -> str:
+        query = ""
+        cleaned = raw.replace("\\", "/")
+        if "?" in cleaned:
+            cleaned, query = cleaned.split("?", 1)
+            query = "?" + query
+        for old, new in replacements.items():
+            if old in cleaned:
+                return cleaned.replace(old, new, 1) + query
+        return raw
+
+    def md(match: re.Match[str]) -> str:
+        return match.group(1) + swap(match.group(2)) + match.group(3)
+
+    def html(match: re.Match[str]) -> str:
+        return match.group(1) + swap(match.group(2)) + match.group(3)
+
+    return _protected_sub(_protected_sub(text, _MD_TARGET, md), _HTML_SRC, html)
 
 
-def optimize_book_images(result: Path, output_root: Path) -> dict[str, int]:
-    from export_results import rebase_markdown_assets
-    result = result.resolve()
-    output_root = output_root.resolve()
-    if result == output_root or not result.is_relative_to(output_root):
-        raise ValueError("Image result must be a book directory inside output-root")
-    files = []
-    for name in ("imgs", "imgs_enhanced"):
-        directory = result / name
-        if directory.is_dir() and not directory.is_symlink():
-            files.extend(p for p in directory.rglob("*")
-                         if p.is_file() and not p.is_symlink()
-                         and p.resolve().is_relative_to(result)
-                         and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"})
-    files.sort()
-    before = sum(p.stat().st_size for p in files)
-    mapping = {}
-    warnings = 0
-    _emit("optimization_started", total=len(files))
-    for index, source in enumerate(files, 1):
-        try:
-            optimized = optimize_image(source, allow_webp="imgs_enhanced" in source.relative_to(result).parts)
-            if optimized != source:
-                mapping[source.resolve()] = optimized.resolve()
-        except Exception as exc:
-            warnings += 1
-            _emit("log", level="warning", message=f"Изображение сохранено без оптимизации: {source.name}: {exc}")
-        _emit("optimization_progress", done=index, total=len(files))
-    # New images are committed before links, all links before deletion. If a
-    # write fails or the process is terminated, both old and new paths work.
-    markdowns = list(result.rglob("*.md"))
-    exports = output_root / "exports"
-    if exports.is_dir() and not exports.is_symlink():
-        markdowns.extend(exports.rglob("*.md"))
-    contents = {}
-    for path in sorted(set(markdowns)):
-        if path.is_symlink() or not path.resolve().is_relative_to(output_root):
+def _markdown_files(root: Path) -> list[Path]:
+    found: list[Path] = []
+    for path in root.rglob("*.md"):
+        if not path.is_file() or ".job" in path.parts:
             continue
-        contents[path] = path.read_text(encoding="utf-8")
-    planned = {p: rebase_markdown_assets(text, p.parent, p.parent, asset_map=mapping)
-               for p, text in contents.items()}
-    def mentioned(name: str, texts) -> bool:
-        pattern = re.compile(re.escape(name) + r"(?![\w.-])")
-        return any(pattern.search(re.sub(r"\\(.)", r"\1", unquote(html.unescape(text)))) for text in texts)
-    # Reference-style links, srcset and literals are deliberately not rewritten.
-    # If any old filename remains, keep that filename and recompress its PNG
-    # instead of creating a broken reference or retaining duplicate images.
-    for source, target in list(mapping.items()):
-        if mentioned(source.name, planned.values()):
-            del mapping[source]
-            optimize_image(source, allow_webp=False)
-            if target not in files and not mentioned(target.name, contents.values()):
-                target.unlink(missing_ok=True)
-    for path, content in contents.items():
-        changed = rebase_markdown_assets(content, path.parent, path.parent, asset_map=mapping)
-        if changed != content:
-            _atomic_text(path, changed)
-    for source in mapping:
-        source.unlink(missing_ok=True)
-    after_files = {mapping.get(p.resolve(), p.resolve()) for p in files}
-    after = sum(p.stat().st_size for p in after_files if p.exists())
-    stats = {"images": len(files), "bytes_before": before, "bytes_after": after,
-             "saved_bytes": max(0, before - after), "warnings": warnings}
-    _emit("optimization_done", **stats)
-    return stats
+        found.append(path)
+    return found
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--result", required=True)
-    parser.add_argument("--output-root", required=True)
-    args = parser.parse_args()
-    try:
-        optimize_book_images(Path(args.result), Path(args.output_root))
-    except Exception as exc:
-        _emit("error", message=f"Оптимизация не завершена, исходные изображения сохранены: {exc}")
-        return 3
-    return 0
+def _still_mentioned(root: Path, needle: str) -> bool:
+    for path in _markdown_files(root):
+        if needle in path.read_text(encoding="utf-8", errors="replace"):
+            return True
+    return False
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+def _atomic_write(path: Path, text: str) -> None:
+    temp = path.with_name(path.name + ".opt.tmp")
+    temp.write_text(text, encoding="utf-8")
+    temp.replace(path)
+
+
+def optimize_tree(root: Path, progress: Progress | None = None) -> dict[str, int]:
+    """Оптимизирует картинки внутри результата. Корень включает и exports."""
+    root = Path(root)
+    if Image is None or not root.is_dir():
+        return {"saved_bytes": 0, "converted": 0, "repacked": 0}
+    images = [
+        path for path in root.rglob("*")
+        if path.is_file() and path.suffix.lower() == ".png" and ".job" not in path.parts
+        and any(part in {"imgs", "imgs_enhanced"} for part in path.parts)
+    ]
+    total = len(images)
+    saved = 0
+    converted = 0
+    repacked = 0
+    planned: list[tuple[Path, Path, str, str]] = []
+    for index, path in enumerate(images, 1):
+        _emit(progress, index, total, path.name)
+        enhanced = "imgs_enhanced" in path.parts
+        if not enhanced:
+            gained = _repack_png(path)
+            saved += gained
+            if gained:
+                repacked += 1
+            continue
+        webp = path.with_suffix(".webp")
+        if webp.exists() and webp.stat().st_size > 0:
+            # Чужой отличающийся WebP не перезаписываем.
+            try:
+                with Image.open(path) as src, Image.open(webp) as dst:
+                    src.load()
+                    dst.load()
+                    if not _same_pixels(src, dst):
+                        gained = _repack_png(path)
+                        saved += gained
+                        if gained:
+                            repacked += 1
+                        continue
+            except Exception:
+                continue
+        try:
+            with Image.open(path) as image:
+                image.load()
+                if not _supported(image):
+                    continue
+                snapshot = image.copy()
+            _save_webp(snapshot, webp)
+            with Image.open(path) as src, Image.open(webp) as dst:
+                src.load()
+                dst.load()
+                if webp.stat().st_size >= path.stat().st_size or not _same_pixels(src, dst):
+                    webp.unlink(missing_ok=True)
+                    gained = _repack_png(path)
+                    saved += gained
+                    if gained:
+                        repacked += 1
+                    continue
+        except Exception:
+            webp.unlink(missing_ok=True)
+            continue
+        old = path.relative_to(root).as_posix()
+        new = webp.relative_to(root).as_posix()
+        planned.append((path, webp, old, new))
+
+    # Ссылки обновляются после того, как новые файлы уже лежат на диске.
+    replacements: dict[str, str] = {}
+    for _src, _dst, old, new in planned:
+        old_name = "imgs_enhanced/" + Path(old).name
+        new_name = "imgs_enhanced/" + Path(new).name
+        replacements[old_name] = new_name
+        replacements[old] = new
+    if replacements:
+        for markdown in _markdown_files(root):
+            original = markdown.read_text(encoding="utf-8")
+            changed = rewrite_names(original, replacements)
+            if changed != original:
+                _atomic_write(markdown, changed)
+
+    for src, dst, old, new in planned:
+        short_old = "imgs_enhanced/" + src.name
+        if _still_mentioned(root, short_old) or _still_mentioned(root, old):
+            dst.unlink(missing_ok=True)
+            gained = _repack_png(src)
+            saved += gained
+            if gained:
+                repacked += 1
+            continue
+        before = src.stat().st_size
+        src.unlink(missing_ok=True)
+        saved += max(0, before - dst.stat().st_size)
+        converted += 1
+    return {"saved_bytes": saved, "converted": converted, "repacked": repacked}

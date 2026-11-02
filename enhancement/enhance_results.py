@@ -70,6 +70,7 @@ def main() -> int:
         return 0
 
     upsampler = None
+    neural_disabled = False
     if args.mode == "hybrid":
         # Enhancement never downloads models; missing optional weights fall back.
         # Set this before importing the optional loader (HF reads it at import).
@@ -79,7 +80,9 @@ def main() -> int:
 
             upsampler = make_upsampler("RealESRGAN_x2plus", tile=args.tile)
         except Exception as exc:
-            print(f"ENHANCE_WARNING Real-ESRGAN unavailable; using classical restoration: {exc}", flush=True)
+            print(f"ENHANCE_WARNING Real-ESRGAN недоступен, остаётся обычное восстановление: {exc}", flush=True)
+            upsampler = None
+            neural_disabled = True
 
     enhanced_count = 0
     upscaled_count = 0
@@ -100,19 +103,24 @@ def main() -> int:
             height, width = restored.shape[:2]
             should_upscale = (
                 upsampler is not None
+                and not neural_disabled
                 and min(width, height) < args.small_edge
                 and width * height <= args.max_pixels
             )
             if should_upscale:
+                temp = dst_dir / (dst.stem + ".pre_esrgan.png")
                 try:
-                    output, _ = upsampler.enhance(restored, outscale=2)
+                    Image.fromarray(restored).save(temp)
+                    output, _ = upsampler.enhance(np.asarray(Image.open(temp)), outscale=2)
                     restored = output
                     method += " + Real-ESRGAN x2 (MLX)"
                     upscaled_count += 1
                 except Exception as exc:
-                    print(f"ENHANCE_WARNING {src}: Real-ESRGAN failed; keeping classical restoration: {exc}", flush=True)
-                    # Avoid repeated Metal/model errors for the remaining images.
+                    neural_disabled = True
                     upsampler = None
+                    print(f"ENHANCE_WARNING Real-ESRGAN остановлен до конца этого запуска: {exc}", flush=True)
+                finally:
+                    temp.unlink(missing_ok=True)
             Image.fromarray(restored).save(dst, optimize=True)
             enhanced_count += 1
             replacements[f"imgs/{relative.as_posix()}"] = f"imgs_enhanced/{relative.with_suffix('.png').as_posix()}"

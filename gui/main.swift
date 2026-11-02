@@ -814,10 +814,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         if let eta = event["eta_seconds"] as? Int { queue[row].etaSeconds = eta }
         let enhancementEnabled = enhanceCheckbox.state == .on
         let exportEnabled = !selectedExportFormats().isEmpty
-        let enhancementShare = enhancementEnabled ? 0.12 : 0.0
-        let exportShare = exportEnabled ? 0.10 : 0.0
-        let optimizationShare = 0.03
-        let ocrEnd = 1.0 - enhancementShare - exportShare - optimizationShare - 0.01
+        let enhancementShare = enhancementEnabled ? 0.10 : 0.0
+        let exportShare = exportEnabled ? 0.08 : 0.0
+        let optimizeShare = 0.06
+        let ocrEnd = 1.0 - enhancementShare - exportShare - optimizeShare
         let enhancementEnd = ocrEnd + enhancementShare
         let exportEnd = enhancementEnd + exportShare
         func ocrProgress() {
@@ -892,6 +892,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             let total = max(1, event["total"] as? Int ?? 1)
             queue[row].progress = enhancementEnd + exportShare * Double(done) / Double(total)
             queue[row].message = "Создаю: \(formatTitle(format))"
+        case "optimize_started":
+            let total = event["total"] as? Int ?? 0
+            queue[row].progress = max(queue[row].progress, exportEnd)
+            queue[row].message = total > 0 ? "Оптимизация картинок: 0 из \(total)" : "Картинки для упаковки не найдены"
+        case "optimize_progress":
+            let done = event["done"] as? Int ?? 0
+            let total = max(1, event["total"] as? Int ?? 1)
+            queue[row].progress = exportEnd + optimizeShare * min(1, Double(done) / Double(total))
+            queue[row].message = "Оптимизация картинок: \(done) из \(total)"
+        case "optimize_done":
+            let saved = event["saved_bytes"] as? Int ?? 0
+            queue[row].progress = max(queue[row].progress, exportEnd + optimizeShare)
+            let megabytes = Double(saved) / 1_048_576
+            queue[row].message = saved > 0 ? String(format: "Картинки легче на %.1f МБ", megabytes) : "Картинки уже компактные"
+            append(saved > 0 ? String(format: "✓ Изображения упакованы без потери пикселей, −%.1f МБ.\n", megabytes) : "✓ Упаковка изображений ничего не изменила.\n")
         case "clean_pdf_progress":
             let pagesDone = event["pages_done"] as? Int ?? 0
             let pagesTotal = max(1, event["pages_total"] as? Int ?? 1)
@@ -924,10 +939,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         case "optimization_progress":
             let done = event["done"] as? Int ?? 0
             let total = max(1, event["total"] as? Int ?? 1)
-            queue[row].progress = exportEnd + optimizationShare * min(1, max(0, Double(done) / Double(total)))
+            queue[row].progress = exportEnd + optimizeShare * min(1, max(0, Double(done) / Double(total)))
             queue[row].message = "Сжатие без потерь: \(done) из \(total)"
         case "optimization_done":
-            queue[row].progress = max(queue[row].progress, exportEnd + optimizationShare)
+            queue[row].progress = max(queue[row].progress, exportEnd + optimizeShare)
             let saved = event["saved_bytes"] as? Int64 ?? 0
             let size = ByteCountFormatter.string(fromByteCount: saved, countStyle: .file)
             queue[row].message = "Сжатие без потерь завершено · сэкономлено \(size)"
@@ -1549,6 +1564,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         showImagePair(0)
     }
 
+    private func loadPreviewImage(_ path: String) -> NSImage? {
+        guard !path.isEmpty, FileManager.default.fileExists(atPath: path) else { return nil }
+        let url = URL(fileURLWithPath: path) as CFURL
+        if let source = CGImageSourceCreateWithURL(url, nil),
+           let image = CGImageSourceCreateImageAtIndex(source, 0, nil) {
+            return NSImage(cgImage: image, size: .zero)
+        }
+        return NSImage(contentsOfFile: path)
+    }
+
     @objc private func imageChanged() { showImagePair(imagePopup.indexOfSelectedItem) }
     private func showImagePair(_ index: Int) {
         guard imagePairs.indices.contains(index) else {
@@ -1557,8 +1582,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let pair = imagePairs[index]
         let original = pair["original"] as? String ?? ""
         let enhanced = pair["enhanced"] as? String ?? ""
-        originalImage.image = previewImage(original)
-        enhancedImage.image = previewImage(enhanced)
+        originalImage.image = loadPreviewImage(original)
+        enhancedImage.image = loadPreviewImage(enhanced)
         originalCaption.stringValue = original
         enhancedCaption.stringValue = enhanced.isEmpty ? "Для этого изображения улучшенная копия не создавалась" : "\(enhanced)\n\(pair["method"] as? String ?? "")"
         compareChanged()

@@ -41,24 +41,27 @@ fi
 
 echo "Используется Python: $PY_BIN ($("$PY_BIN" --version))"
 
-# Create missing environments, but always reconcile requirements. A directory
-# can remain after an interrupted install and is not a completion marker.
 echo "==> Проверка окружений Python..."
 
-for name in mlx enhance sdk; do
-  env_dir=".venv-$name"
-  if [[ ! -x "$env_dir/bin/python" ]]; then
-    echo "Создание/восстановление $env_dir..."
-    "$PY_BIN" -m venv "$env_dir"
+ensure_env() {
+  local name="$1"
+  local requirements="$2"
+  local py=".$name/bin/python"
+  if [[ ! -x "$py" ]]; then
+    echo "Создание .$name..."
+    "$PY_BIN" -m venv ".$name"
   fi
-  echo "Проверка зависимостей $env_dir..."
-  # uv-created environments can have a working Python without a pip module.
-  if ! "$env_dir/bin/python" -m pip --version >/dev/null 2>&1; then
-    "$env_dir/bin/python" -m ensurepip --upgrade
+  if ! "$py" -m pip --version >/dev/null 2>&1; then
+    echo "В .$name нет pip, восстанавливаю через ensurepip..."
+    "$py" -m ensurepip --upgrade
   fi
-  "$env_dir/bin/python" -m pip install --upgrade pip setuptools wheel
-  "$env_dir/bin/python" -m pip install -r "requirements/$name.txt"
-done
+  "$py" -m pip install --upgrade pip setuptools wheel
+  "$py" -m pip install -r "$requirements"
+}
+
+ensure_env "venv-mlx" "requirements/mlx.txt"
+ensure_env "venv-enhance" "requirements/enhance.txt"
+ensure_env "venv-sdk" "requirements/sdk.txt"
 
 # Compile Swift GUI App
 echo "==> Сборка приложения macOS (GLM OCR Local.app)..."
